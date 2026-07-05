@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&amp;family=Hanken+Grotesk:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  @keyframes sk-fog { 0%{transform:translateX(-6%)} 50%{transform:translateX(6%)} 100%{transform:translateX(-6%)} }
+  @keyframes sk-fog2 { 0%{transform:translateX(5%)} 50%{transform:translateX(-7%)} 100%{transform:translateX(5%)} }
+  @keyframes sk-glow { 0%,100%{opacity:.55} 50%{opacity:.9} }
+  @keyframes sk-twinkle { 0%,100%{opacity:.25} 50%{opacity:.9} }
+  @keyframes sk-rise { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes sk-float { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes sk-pulse { 0%{box-shadow:0 0 0 0 rgba(70,209,127,.55)} 70%{box-shadow:0 0 0 7px rgba(70,209,127,0)} 100%{box-shadow:0 0 0 0 rgba(70,209,127,0)} }
+  @keyframes sk-cloud { from{transform:translateX(0)} to{transform:translateX(1180px)} }
+  @keyframes sk-wisp { from{transform:translateX(0)} to{transform:translateX(1220px)} }
+  @keyframes sk-bob { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
+  @keyframes sk-shoot {
+    0% { opacity:0; transform: translate(0,0) rotate(20deg) scaleX(0.4); }
+    1.4% { opacity:1; }
+    2.4% { opacity:1; }
+    3.4% { opacity:0; transform: translate(178px,65px) rotate(20deg) scaleX(1); }
+    100% { opacity:0; transform: translate(178px,65px) rotate(20deg) scaleX(1); }
+  }
+</style>
+</helmet>
+<div style="{{ rootStyle }}">
+
+  <!-- sky ambience (stars / moon / sun) — spans full height incl. top -->
+  <div style="position:absolute;inset:0;z-index:0;pointer-events:none;overflow:hidden;border-radius:18px;">{{ ambience }}</div>
+
+  <!-- header -->
+  <div style="position:relative;z-index:6;display:flex;align-items:flex-start;justify-content:space-between;padding:26px 30px 0;gap:18px;">
+    <div>
+      <div style="font-family:'Newsreader',Georgia,serif;font-size:27px;line-height:1.1;color:var(--ink);">The retrospective skyline</div>
+      <sc-if value="{{ isLive }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;align-items:center;gap:8px;margin-top:7px;">
+          <sc-if value="{{ isAuto }}" hint-placeholder-val="{{ false }}">
+            <span style="width:7px;height:7px;border-radius:50%;background:#46d17f;animation:sk-pulse 2s ease-out infinite;flex:0 0 auto;"></span>
+          </sc-if>
+          <sc-if value="{{ isManual }}" hint-placeholder-val="{{ false }}">
+            <span style="width:7px;height:7px;border-radius:50%;background:var(--win-on);flex:0 0 auto;"></span>
+          </sc-if>
+          <div style="font-size:12.5px;color:var(--ink-soft);">{{ variantName }}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:9px;margin-top:11px;">
+          <span style="font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-soft);font-weight:700;">Preview</span>
+          <div style="display:flex;gap:3px;padding:3px;border-radius:11px;background:var(--card);border:1px solid var(--stroke);backdrop-filter:blur(6px);">
+            <sc-for list="{{ modes }}" as="m" hint-placeholder-count="4">
+              <div onClick="{{ m.onClick }}" style="{{ m.style }}">{{ m.label }}</div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+    <div onClick="{{ toggle }}" style="cursor:pointer;display:flex;align-items:center;gap:11px;padding:9px 13px;border-radius:14px;border:1px solid var(--stroke);background:var(--card);backdrop-filter:blur(6px);">
+      <div style="text-align:right;">
+        <div style="font-size:12.5px;font-weight:600;color:var(--ink);">Ghost forecast</div>
+        <div style="font-size:10.5px;color:var(--ink-soft);">where this is heading</div>
+      </div>
+      <div style="{{ trackStyle }}"><div style="{{ knobStyle }}"></div></div>
+    </div>
+  </div>
+
+  <!-- scene -->
+  <div style="position: relative; flex: 1; min-height: 0;">
+
+    <!-- fog layers (forecast) -->
+    <sc-if value="{{ forecastOn }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;z-index:3;pointer-events:none;overflow:hidden;">
+        <div style="position:absolute;left:-15%;right:-15%;bottom:18%;height:60%;background:radial-gradient(60% 100% at 30% 100%, var(--fog), transparent 70%);filter:blur(10px);animation:sk-fog 13s ease-in-out infinite;"></div>
+        <div style="position:absolute;left:-15%;right:-15%;bottom:8%;height:52%;background:radial-gradient(55% 100% at 70% 100%, var(--fog), transparent 72%);filter:blur(14px);animation:sk-fog2 17s ease-in-out infinite;"></div>
+      </div>
+    </sc-if>
+
+    <!-- buildings -->
+    <div style="position:absolute;left:0;right:0;bottom:0;z-index:4;display:flex;align-items:flex-end;justify-content:center;gap:26px;padding:0 34px 26px;">
+      <sc-for list="{{ projects }}" as="b" hint-placeholder-count="4">
+        <div style="position:relative;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;width:{{ b.w }}px;">
+
+          <!-- calendar pin -->
+          <sc-if value="{{ b.showPin }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute;top:-46px;z-index:7;display:flex;flex-direction:column;align-items:center;animation:sk-rise .5s ease both;">
+              <div style="background:var(--pin);color:var(--pin-ink);font-size:10.5px;font-weight:700;letter-spacing:.02em;padding:5px 9px;border-radius:8px;white-space:nowrap;box-shadow:0 6px 16px rgba(0,0,0,.28);">{{ b.pinLabel }}</div>
+              <div style="font-size:8px;letter-spacing:.18em;color:var(--pin);font-weight:700;margin-top:3px;opacity:.85;">LOCKED IN</div>
+              <div style="width:1px;height:14px;background:var(--pin);opacity:.55;margin-top:2px;"></div>
+            </div>
+          </sc-if>
+
+          <!-- trend plume (forecast) -->
+          <sc-if value="{{ b.showTrend }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute;left:0;right:0;bottom:34px;height:{{ b.h }}px;z-index:3;">{{ b.plume }}</div>
+          </sc-if>
+
+          <!-- building body -->
+          <div onClick="{{ b.onSelect }}" style="position:relative;z-index:5;width:100%;height:{{ b.h }}px;cursor:pointer;border-radius:5px 5px 0 0;background:linear-gradient(180deg,var(--building-top),var(--building));box-shadow:inset 0 0 0 1px var(--stroke), 0 -2px 30px rgba(0,0,0,.14);overflow:hidden;transition:transform .25s ease;">
+            <sc-if value="{{ b.halo }}" hint-placeholder-val="{{ false }}">
+              <div style="position:absolute;inset:-40% -30%;background:radial-gradient(50% 55% at 50% 60%, var(--glow), transparent 70%);animation:sk-glow 4.5s ease-in-out infinite;pointer-events:none;"></div>
+            </sc-if>
+            <div style="position:relative;height:100%;">{{ b.grid }}</div>
+            <sc-if value="{{ b.selected }}" hint-placeholder-val="{{ false }}">
+              <div style="position:absolute;inset:0;border-radius:5px 5px 0 0;box-shadow:inset 0 0 0 2px var(--accent);pointer-events:none;"></div>
+            </sc-if>
+          </div>
+
+          <!-- base label -->
+          <div style="margin-top:18px;display:flex;flex-direction:column;align-items:center;gap:6px;width:126px;">
+            <div style="width:20px;height:20px;border-radius:50%;background:var(--card);border:1px solid var(--stroke);color:var(--ink);font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 auto;">{{ b.rank }}</div>
+            <div style="font-size:13px;font-weight:600;color:var(--ink);line-height:1.25;text-wrap:balance;">{{ b.name }}</div>
+            <div style="font-size:11px;color:var(--ink-soft);">{{ b.lastMoved }}</div>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+
+    <!-- drift callout (forecast) -->
+    <sc-if value="{{ forecastOn }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;left:30px;bottom:96px;z-index:8;width:290px;background:var(--card);border:1px solid var(--card-bd);border-radius:14px;padding:15px 17px;backdrop-filter:blur(10px);box-shadow:0 18px 46px rgba(0,0,0,.34);animation:sk-float .5s ease both;">
+        <div style="display:flex;align-items:center;gap:7px;">
+          <div style="width:7px;height:7px;border-radius:50%;background:var(--accent);"></div>
+          <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:var(--ink);">Music is drifting to the edge</div>
+        </div>
+        <div style="font-family:'Newsreader',Georgia,serif;font-size:16px;line-height:1.4;color:var(--ink);margin-top:9px;">Last time it went quiet this long, a Tuesday morning got it going again — two hours at the piano, and it held for six weeks.</div>
+        <div style="font-size:10.5px;color:var(--ink-soft);margin-top:9px;">pulled from your own logged activity</div>
+      </div>
+    </sc-if>
+
+    <!-- detail card -->
+    <sc-if value="{{ hasSel }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;top:96px;right:22px;z-index:9;width:262px;background:var(--card);border:1px solid var(--card-bd);border-radius:14px;padding:16px 17px;backdrop-filter:blur(12px);box-shadow:0 20px 50px rgba(0,0,0,.4);animation:sk-rise .3s ease both;">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
+          <div style="font-size:15.5px;font-weight:700;color:var(--ink);">{{ sel.name }}</div>
+          <div onClick="{{ closeSel }}" style="cursor:pointer;color:var(--ink-soft);font-size:16px;line-height:1;padding:2px 4px;">×</div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:7px;margin-top:12px;">
+          <div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--ink-soft);">Stated priority</span><span style="color:var(--ink);font-weight:600;">#{{ sel.rank }}</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--ink-soft);">Last activity</span><span style="color:var(--ink);font-weight:600;">{{ sel.lastMoved }}</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--ink-soft);">Sessions logged</span><span style="color:var(--ink);font-weight:600;">{{ sel.sessions }}</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--ink-soft);">Check-in threshold</span><span style="color:var(--ink);font-weight:600;">{{ sel.threshold }}</span></div>
+        </div>
+        <div style="font-family:'Newsreader',Georgia,serif;font-size:13.5px;line-height:1.45;color:var(--ink);opacity:.86;margin-top:13px;padding-top:12px;border-top:1px solid var(--stroke);">{{ sel.note }}</div>
+
+        <sc-if value="{{ sel.showCheckin }}" hint-placeholder-val="{{ false }}">
+          <div style="margin-top:13px;padding:12px 13px;border-radius:11px;background:var(--fog);border:1px solid var(--stroke);">
+            <div style="font-size:12.5px;color:var(--ink);line-height:1.4;">{{ sel.checkinText }}</div>
+            <sc-if value="{{ noCheckin }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;gap:8px;margin-top:11px;">
+                <div onClick="{{ keepIt }}" style="cursor:pointer;flex:1;text-align:center;font-size:12px;font-weight:600;padding:8px;border-radius:9px;background:var(--accent);color:#fff;">Yes, keep it</div>
+                <div onClick="{{ reorder }}" style="cursor:pointer;flex:1;text-align:center;font-size:12px;font-weight:600;padding:8px;border-radius:9px;background:transparent;border:1px solid var(--stroke);color:var(--ink);">Reorder</div>
+              </div>
+            </sc-if>
+            <sc-if value="{{ checkinMsg }}" hint-placeholder-val="{{ false }}">
+              <div style="font-size:12px;color:var(--ink);margin-top:10px;display:flex;align-items:center;gap:7px;"><span style="width:6px;height:6px;border-radius:50%;background:var(--accent);"></span>{{ checkinMsg }}</div>
+            </sc-if>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+  </div>
+
+  <!-- truth panel -->
+  <div style="position:relative;z-index:6;padding:20px 30px 26px;border-top:1px solid var(--stroke);background:var(--card);backdrop-filter:blur(8px);">
+    <div style="display:flex;align-items:flex-start;gap:16px;justify-content:space-between;flex-wrap:wrap;">
+      <div style="max-width:600px;">
+        <div style="font-family:'Newsreader',Georgia,serif;font-style:italic;font-size:21px;line-height:1.34;color:var(--ink);text-wrap:pretty;">{{ truth.pre }}<span style="font-style:normal;font-weight:600;">{{ truth.aName }}</span>{{ truth.mid }}<span style="font-style:normal;font-weight:600;">{{ truth.bName }}</span>{{ truth.post }}</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;font-size:10.5px;color:var(--ink-soft);white-space:nowrap;">
+        <div style="display:flex;align-items:center;gap:7px;"><span style="width:9px;height:9px;border-radius:2px;background:var(--win-on);box-shadow:0 0 6px var(--glow);"></span>lit = recent activity</div>
+        <div style="display:flex;align-items:center;gap:7px;"><span style="color:var(--ink);font-weight:700;">←</span>left = higher stated priority</div>
+        <div style="display:flex;align-items:center;gap:7px;"><span style="width:9px;height:9px;border-radius:50%;background:var(--fog);"></span>fog = forecast trend</div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:900,&quot;height&quot;:780},&quot;themeVars&quot;:{&quot;editor&quot;:null,&quot;tsType&quot;:&quot;object&quot;},&quot;variantName&quot;:{&quot;editor&quot;:&quot;text&quot;,&quot;default&quot;:&quot;Night · Calm &amp; contemplative&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;flavor&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;night&quot;,&quot;dusk&quot;,&quot;day&quot;],&quot;default&quot;:&quot;night&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = { forecastOn:false, selectedId:null, checkin:null, now:new Date(), override:null };
+
+  componentDidMount() {
+    this._tick = setInterval(() => this.setState({ now:new Date() }), 15000);
+  }
+  componentWillUnmount() { clearInterval(this._tick); }
+
+  // Real-clock time-of-day. Night comes on at sunset (~7:30pm), lifts at dawn.
+  flavorForTime(d) {
+    const h = d.getHours() + d.getMinutes()/60;
+    if (h >= 6 && h < 16.5) return 'day';
+    if ((h >= 16.5 && h < 19.5) || (h >= 5 && h < 6)) return 'dusk';
+    return 'night';
+  }
+  themeFor(f) { return f==='night' ? this.NIGHT() : f==='dusk' ? this.DUSK() : this.DAY(); }
+
+  DUSK() { return {
+    '--sky':'linear-gradient(180deg,#1e2650 0%,#463c78 36%,#985a84 68%,#e6996b 100%)',
+    '--ink':'#fbeee9','--ink-soft':'rgba(250,232,224,0.74)',
+    '--building':'#2c2447','--building-top':'#3b3160',
+    '--win-on':'#ffce87','--win-off':'rgba(90,70,110,0.30)',
+    '--glow':'rgba(255,180,120,0.62)','--accent':'#8aa6e4',
+    '--track-off':'rgba(255,235,220,0.28)','--fog':'rgba(255,222,202,0.24)',
+    '--pin':'#fff2e6','--pin-ink':'#4a2740',
+    '--card':'rgba(38,26,56,0.80)','--card-bd':'rgba(255,205,175,0.26)','--stroke':'rgba(255,215,190,0.18)'
+  };}
+  DAY() { return {
+    '--sky':'linear-gradient(180deg,#8fc4ea 0%,#b6dcf3 48%,#e4f2fb 100%)',
+    '--ink':'#16233a','--ink-soft':'rgba(30,52,84,0.62)',
+    '--building':'#aec1d5','--building-top':'#c6d5e3',
+    '--win-on':'#356199','--win-off':'rgba(120,145,175,0.26)',
+    '--glow':'rgba(70,130,200,0.4)','--accent':'#2f6bb0',
+    '--track-off':'rgba(60,90,130,0.22)','--fog':'rgba(255,255,255,0.62)',
+    '--pin':'#1f5fae','--pin-ink':'#ffffff',
+    '--card':'rgba(255,255,255,0.92)','--card-bd':'rgba(40,80,130,0.18)','--stroke':'rgba(40,80,130,0.14)'
+  };}
+
+  NIGHT() { return {
+    '--sky':'linear-gradient(180deg,#050b18 0%,#0a1b36 52%,#123259 100%)',
+    '--ink':'#eaf1fb','--ink-soft':'rgba(206,222,245,0.64)',
+    '--building':'#0f2647','--building-top':'#16345f',
+    '--win-on':'#ffd39a','--win-off':'rgba(130,160,200,0.10)',
+    '--glow':'rgba(255,196,130,0.55)','--accent':'#6fa8e6',
+    '--track-off':'rgba(150,180,220,0.25)','--fog':'rgba(206,224,246,0.20)',
+    '--pin':'#eaf3ff','--pin-ink':'#0c2245',
+    '--card':'rgba(9,22,44,0.82)','--card-bd':'rgba(140,175,220,0.24)','--stroke':'rgba(150,180,220,0.16)'
+  };}
+
+  // lit windows fill from the ground up — more recent activity = more floors lit
+  maskFrom(activity, total) {
+    const lit = activity <= 0 ? 0 : Math.max(1, Math.round(total * activity));
+    const m = [];
+    for (let i=0;i<total;i++) m.push(i >= total - lit);
+    return m;
+  }
+  grid(activity, h, flavor) {
+    const rows = Math.max(3, Math.round((h - 44) / 36));
+    const total = rows * 3;
+    const cells = this.maskFrom(activity, total).map((on,i)=>React.createElement('div',{key:i,style:{
+      aspectRatio:'3 / 4', borderRadius:'1px',
+      background: on ? 'var(--win-on)' : 'var(--win-off)',
+      boxShadow: (on && flavor!=='day') ? '0 0 7px 1px var(--glow)' : 'none',
+      transition:'background .5s ease'
+    }}));
+    return React.createElement('div',{style:{
+      display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'5px',
+      padding:'24px 12px 16px', height:'100%', boxSizing:'border-box', alignContent:'end'
+    }}, cells);
+  }
+  DEFAULTS() {
+    return [
+      { id:'music', name:'Music / Album', lastMoved:'August 2025', activity:0.05, stature:0.97, trend:'fading', pinned:false, pinLabel:'', sessions:'0 in ~10 months', threshold:'2 weeks', note:'Quiet, not gone. The folder is holding the space until it wakes up.', quiet:true },
+      { id:'substack', name:'Substack', lastMoved:'4 days ago', activity:0.95, stature:0.70, trend:'rising', pinned:true, pinLabel:'Draft due · Fri', sessions:'11 this quarter', threshold:'5 days', note:'Steady cadence. Your current golden child.', quiet:false },
+      { id:'wedding', name:'Real Wedding', lastMoved:'3 weeks ago', activity:0.42, stature:0.31, trend:'steady', pinned:true, pinLabel:'Venue call · Jul 12', sessions:'3 this quarter', threshold:'6 weeks', note:'Saving phase. Slow is the plan, on purpose.', quiet:false },
+      { id:'para', name:'PARA Setup', lastMoved:'6 days ago', activity:0.68, stature:0.13, trend:'steady', pinned:false, pinLabel:'', sessions:'8 this month', threshold:'10 days', note:'Active build. Nearly ready to archive itself.', quiet:false }
+    ];
+  }
+  // the single truest thing, generated live from current order + activity
+  buildTruth(ranked) {
+    const phrase = (lm) => /ago|just|today|yesterday|week|month|day/i.test(lm) ? `it’s been quiet — last touched ${lm}` : `it hasn’t moved since ${lm}`;
+    const A = ranked.find(p => p.quiet);
+    if (A) {
+      const B = ranked.reduce((b,p) => (p.id !== A.id && (!b || p.activity > b.activity)) ? p : b, null) || A;
+      return { pre:'You’ve kept ', aName:A.name, mid:` at #${A.rank} since you set this up — ${phrase(A.lastMoved)}. Meanwhile `, bName:B.name, post:`, ranked #${B.rank}, moved ${B.lastMoved}.` };
+    }
+    const top = ranked[0] || { name:'—', rank:1, lastMoved:'—', id:'_' };
+    let B = ranked.reduce((b,p) => (!b || p.activity > b.activity) ? p : b, null) || top;
+    if (B.id === top.id) B = ranked.filter(p => p.id !== top.id).reduce((b,p) => (!b || p.activity > b.activity) ? p : b, null) || top;
+    return { pre:'Nothing’s drifting — you’ve kept ', aName:top.name, mid:` at #1, and it moved ${top.lastMoved}. `, bName:B.name, post:`, ranked #${B.rank}, is your most recent — ${B.lastMoved}.` };
+  }
+  plume(tr) {
+    if (tr==='fading') return React.createElement('div',{style:{position:'absolute',left:'-18%',right:'-18%',bottom:0,height:'145%',background:'linear-gradient(180deg, transparent 0%, var(--fog) 60%, var(--fog) 100%)',filter:'blur(7px)',borderRadius:'50% 50% 0 0',pointerEvents:'none'}});
+    if (tr==='rising') return React.createElement('div',{style:{position:'absolute',left:'-6%',right:'-6%',bottom:'30%',height:'95%',background:'radial-gradient(60% 70% at 50% 100%, var(--glow), transparent 70%)',opacity:0.55,filter:'blur(5px)',pointerEvents:'none'}});
+    return React.createElement('div',{style:{position:'absolute',left:'-10%',right:'-10%',bottom:0,height:'110%',background:'linear-gradient(180deg, transparent, var(--fog))',opacity:0.55,filter:'blur(6px)',pointerEvents:'none'}});
+  }
+  cloud(o) {
+    const s = o.scale, px = n => (n * s) + 'px';
+    const puff = (d, l, t) => React.createElement('div', { key:'p'+l+'-'+t, style:{
+      position:'absolute', width:px(d), height:px(d), left:px(l), top:px(t),
+      borderRadius:'50%', background:'#ffffff'
+    }});
+    const base = React.createElement('div', { key:'base', style:{
+      position:'absolute', width:px(186), height:px(50), left:px(7), top:px(66),
+      borderRadius:px(25), background:'#ffffff'
+    }});
+    return React.createElement('div', { key:o.key, style:{
+      position:'absolute', top:o.top, left:'-16%', width:px(200), height:px(122),
+      filter:'blur('+(o.blur||3)+'px)', opacity:o.opacity,
+      animation:'sk-cloud '+o.dur+'s linear '+o.delay+'s infinite', willChange:'transform', pointerEvents:'none'
+    }}, base, puff(94, 53, 14), puff(64, 12, 46), puff(74, 104, 38), puff(58, 78, 2), puff(46, 150, 30));
+  }
+  wisp(o) {
+    return React.createElement('div', { key:o.key, style:{
+      position:'absolute', top:o.top, left:'-18%',
+      width:(160*o.scale)+'px', height:(15*o.scale)+'px', borderRadius:'50%',
+      background:'radial-gradient(closest-side, rgba(150,92,116,0.6), rgba(110,68,100,0.28) 60%, transparent)',
+      filter:'blur(6px)', opacity:o.opacity,
+      animation:'sk-wisp '+o.dur+'s linear '+o.delay+'s infinite', willChange:'transform', pointerEvents:'none'
+    }});
+  }
+  ambience(flavor) {
+    if (flavor === 'night') {
+      // deterministic hash scatter (no grid alignment, stable across re-renders)
+      const rnd = (i, seed) => { const v = Math.sin(i * seed) * 43758.5453; return v - Math.floor(v); };
+      const stars = [];
+      for (let i=1;i<=78;i++){
+        const x = rnd(i, 12.9898) * 100;
+        const y = rnd(i, 78.233) * 78;
+        const s = 0.8 + rnd(i, 34.117) * 1.9;
+        const d = rnd(i, 5.713) * 4.5;
+        const dur = 2.6 + rnd(i, 9.137) * 3.6;
+        stars.push(React.createElement('div',{key:'st'+i,style:{position:'absolute',left:x.toFixed(2)+'%',top:y.toFixed(2)+'%',width:s.toFixed(2)+'px',height:s.toFixed(2)+'px',borderRadius:'50%',background:'#dce8fb',boxShadow:'0 0 3px rgba(200,222,255,0.7)',animation:`sk-twinkle ${dur.toFixed(2)}s ease-in-out ${d.toFixed(2)}s infinite`}}));
+      }
+      const shooters = [
+        React.createElement('div',{key:'sh1',style:{position:'absolute',left:'13%',top:'11%',width:'82px',height:'2px',borderRadius:'2px',background:'linear-gradient(90deg, transparent, #eaf3ff)',boxShadow:'0 0 7px 1px rgba(200,225,255,0.85)',opacity:0,animation:'sk-shoot 78s linear 21s infinite'}}),
+        React.createElement('div',{key:'sh2',style:{position:'absolute',left:'44%',top:'6%',width:'68px',height:'2px',borderRadius:'2px',background:'linear-gradient(90deg, transparent, #eaf3ff)',boxShadow:'0 0 7px 1px rgba(200,225,255,0.85)',opacity:0,animation:'sk-shoot 117s linear 63s infinite'}})
+      ];
+      return React.createElement('div',{}, ...stars, ...shooters,
+        React.createElement('div',{key:'m',style:{position:'absolute',right:'11%',top:'12%',width:'52px',height:'52px',borderRadius:'50%',background:'radial-gradient(circle at 38% 38%, #f4f7ff, #c9d6ec)',boxShadow:'0 0 44px 8px rgba(210,225,250,0.35)'}}));
+    }
+    if (flavor === 'dusk') {
+      // first stars, high in the still-dark part of the sky
+      const stars = [];
+      for (let i=0;i<16;i++){
+        const x=(i*89+9)%100, y=(i*41+4)%27, s=(i%3)?1.2:1.9, d=(i%5)*0.6;
+        stars.push(React.createElement('div',{key:'s'+i,style:{position:'absolute',left:x+'%',top:y+'%',width:s+'px',height:s+'px',borderRadius:'50%',background:'#fff1e8',opacity:0.85,animation:`sk-twinkle ${3.5+(i%4)}s ease-in-out ${d}s infinite`}}));
+      }
+      const setSun = React.createElement('div',{key:'ss',style:{position:'absolute',right:'19%',top:'40%',width:'164px',height:'164px',animation:'sk-bob 9s ease-in-out infinite'}},
+        React.createElement('div',{key:'h',style:{position:'absolute',inset:'-62%',borderRadius:'50%',background:'radial-gradient(circle, rgba(255,178,116,0.52), rgba(255,146,92,0.18) 42%, transparent 66%)'}}),
+        React.createElement('div',{key:'d',style:{position:'absolute',inset:0,borderRadius:'50%',background:'radial-gradient(circle at 42% 40%, #ffe9b8, #ff9e5c 60%, #f5713f 88%)',boxShadow:'0 0 62px 16px rgba(255,150,90,0.42)'}}));
+      const wisps = [
+        this.wisp({key:'w1', top:'43%', scale:1.4, opacity:0.5, dur:82, delay:-10}),
+        this.wisp({key:'w2', top:'54%', scale:1.9, opacity:0.42, dur:112, delay:-58}),
+        this.wisp({key:'w3', top:'35%', scale:1.0, opacity:0.4, dur:96, delay:-32}),
+        this.wisp({key:'w4', top:'63%', scale:2.2, opacity:0.34, dur:134, delay:-85})
+      ];
+      return React.createElement('div',{}, setSun, ...wisps, ...stars);
+    }
+    // day: sun + fluffy drifting clouds
+    const sun = React.createElement('div',{key:'sun',style:{position:'absolute',right:'13%',top:'9%',width:'230px',height:'230px'}},
+      React.createElement('div',{key:'halo',style:{position:'absolute',inset:0,borderRadius:'50%',background:'radial-gradient(circle, rgba(255,214,110,0.55), rgba(255,224,150,0.22) 42%, transparent 68%)'}}),
+      React.createElement('div',{key:'disc',style:{position:'absolute',left:'50%',top:'50%',transform:'translate(-50%,-50%)',width:'84px',height:'84px',borderRadius:'50%',background:'radial-gradient(circle at 38% 36%, #fff6cf, #ffd24a 58%, #ffbf1e 82%)',boxShadow:'0 0 46px 10px rgba(255,205,90,0.5)'}}));
+    const clouds = [
+      this.cloud({key:'c1', top:'12%', scale:1.3, opacity:0.92, dur:75, delay:-12, blur:5}),
+      this.cloud({key:'c2', top:'25%', scale:0.85, opacity:0.8, dur:100, delay:-45, blur:4}),
+      this.cloud({key:'c3', top:'6%',  scale:1.7, opacity:0.85, dur:135, delay:-80, blur:8}),
+      this.cloud({key:'c4', top:'33%', scale:0.6, opacity:0.62, dur:62, delay:-28, blur:3}),
+      this.cloud({key:'c5', top:'19%', scale:1.05, opacity:0.82, dur:90, delay:-60, blur:5})
+    ];
+    return React.createElement('div',{}, sun, ...clouds);
+  }
+
+  select(id) { this.setState({ selectedId: id, checkin: null }); }
+  setMode(key) { this.setState({ override: key === 'auto' ? null : key }); }
+
+  renderVals() {
+    // Forced flavor (comparison panels) vs live auto mode (follows the real clock)
+    const forced = (this.props.flavor && this.props.flavor !== 'auto') ? this.props.flavor : null;
+    const isLive = !forced;
+    const flavor = forced || this.state.override || this.flavorForTime(this.state.now);
+    const isAuto = isLive && !this.state.override;
+    const isManual = isLive && !!this.state.override;
+    const fc = this.state.forecastOn;
+    const tv = (forced && this.props.themeVars) ? this.props.themeVars : this.themeFor(flavor);
+    const rootStyle = Object.assign({}, tv, {
+      position:'relative', width:'100%', height:'100%', minHeight:'780px', overflow:'hidden',
+      borderRadius:'18px', background:'var(--sky)', color:'var(--ink)',
+      fontFamily:"'Hanken Grotesk', system-ui, sans-serif",
+      display:'flex', flexDirection:'column',
+      boxShadow:'0 30px 80px rgba(10,20,40,0.28)'
+    });
+
+    const defs = (this.props.projects && this.props.projects.length) ? this.props.projects : this.DEFAULTS();
+    const projects = defs.map((d, i) => {
+      const stature = (d.stature != null) ? d.stature : 0.4;
+      const activity = (d.activity != null) ? d.activity : 0.3;
+      const h = Math.round(134 + stature * 178);
+      const w = Math.round(78 + stature * 22);
+      return {
+        id:d.id, name:d.name, rank:i+1, lastMoved:d.lastMoved || '—',
+        sessions:d.sessions || '—', threshold:d.threshold || '—', note:d.note || '',
+        h, w, activity,
+        grid: this.grid(activity, h, flavor),
+        plume: this.plume(d.trend || 'steady'),
+        halo: fc && activity > 0.85,
+        quiet: !!d.quiet,
+        showCheckin: !!d.quiet,
+        checkinText: (i === 0) ? 'This hasn’t moved in a while — still your #1?' : 'This has been quiet — still a priority?',
+        selected: this.state.selectedId === d.id,
+        showPin: fc && !!d.pinned, pinLabel: d.pinLabel || '',
+        showTrend: fc && (d.trend || 'steady') !== 'steady',
+        onSelect: () => this.select(d.id)
+      };
+    });
+    const sel = projects.find(p => p.selected) || null;
+
+    const trackStyle = { width:'46px', height:'26px', borderRadius:'20px', flex:'0 0 auto',
+      background: fc ? 'var(--accent)' : 'var(--track-off)', position:'relative', transition:'background .3s ease' };
+    const knobStyle = { position:'absolute', top:'3px', left:'3px', width:'20px', height:'20px', borderRadius:'50%',
+      background:'#fff', boxShadow:'0 2px 5px rgba(0,0,0,.3)', transform: fc ? 'translateX(20px)' : 'translateX(0)', transition:'transform .3s ease' };
+
+    const names = { day:'Day', dusk:'Dusk', night:'Night' };
+    let variantName;
+    if (isAuto) {
+      const timeStr = this.state.now.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' });
+      variantName = `Live · ${names[flavor]} — ${timeStr}, updates at sunset`;
+    } else if (isManual) {
+      variantName = `Preview · ${names[flavor]} — manual override`;
+    } else {
+      variantName = this.props.variantName || 'Night · Calm & contemplative';
+    }
+
+    const modes = [
+      { key:'auto', label:'Auto' },
+      { key:'day', label:'Day' },
+      { key:'dusk', label:'Dusk' },
+      { key:'night', label:'Night' }
+    ].map(m => {
+      const active = m.key === 'auto' ? isAuto : (this.state.override === m.key);
+      return { key:m.key, label:m.label, onClick: () => this.setMode(m.key), style: {
+        cursor:'pointer', fontSize:'11.5px', fontWeight:600, padding:'5px 12px', borderRadius:'8px',
+        background: active ? 'var(--accent)' : 'transparent',
+        color: active ? '#ffffff' : 'var(--ink-soft)', transition:'background .2s, color .2s', whiteSpace:'nowrap'
+      }};
+    });
+
+    return {
+      rootStyle, projects, sel, hasSel: !!sel, forecastOn: fc, isLive, isAuto, isManual, modes, truth: this.buildTruth(projects),
+      ambience: this.ambience(flavor),
+      variantName,
+      trackStyle, knobStyle,
+      toggle: () => this.setState(s => ({ forecastOn: !s.forecastOn })),
+      closeSel: () => this.setState({ selectedId:null, checkin:null }),
+      noCheckin: !this.state.checkin,
+      checkinMsg: this.state.checkin,
+      keepIt: () => this.setState({ checkin:'Kept at #1. Logged to Notion.' }),
+      reorder: () => this.setState({ checkin:'Opening priority view to reorder…' })
+    };
+  }
+}
+</script>
+</body>
+</html>
