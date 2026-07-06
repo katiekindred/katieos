@@ -2,7 +2,8 @@ import { Client } from '@notionhq/client';
 import type { ActivityLogEntry, Project } from '../types.js';
 import {
   computeActivity, computeHoursThisWeek, computeQuiet, computeStature,
-  computeTrend, computeWeek, findRecovery, parseThresholdDays
+  computeTotalHours, computeTrend, computeWeek, countRecentSessions,
+  findRecovery, parseThresholdDays
 } from './derive.js';
 
 function env(name: string): string | undefined {
@@ -224,7 +225,6 @@ export async function fetchProjects(): Promise<{ projects: Project[]; log: Activ
 
   visible.sort((a: any, b: any) => (num(a.properties['Priority']) ?? 999) - (num(b.properties['Priority']) ?? 999));
 
-  const total = visible.length;
   const projects: Project[] = visible.map((page: any, i: number) => {
     const props = page.properties;
     const projectLog = log.filter(e => e.projectId === page.id);
@@ -235,7 +235,7 @@ export async function fetchProjects(): Promise<{ projects: Project[]; log: Activ
 
     const thresholdStr = text(props['Check-in threshold']) || '2 weeks';
     const thresholdDays = parseThresholdDays(thresholdStr);
-    const activity = computeActivity(lastMovedAt, projectLog);
+    const activity = computeActivity(projectLog);
     const quiet = computeQuiet(lastMovedAt, thresholdDays);
     const nextOverride = text(props['Next Step Override']);
     const next = pickNextStep(tasks, page.id);
@@ -254,8 +254,10 @@ export async function fetchProjects(): Promise<{ projects: Project[]; log: Activ
       nextNote: nextOverride ? 'Set manually' : (next?.note || ''),
       nextTarget: next?.target || '',
       priority: num(props['Priority']) ?? i + 1,
-      activity: quiet ? Math.min(activity, 0.1) : activity,
-      stature: computeStature(null, i + 1, total),
+      activity,
+      recentSessions: countRecentSessions(projectLog),
+      totalHours: computeTotalHours(projectLog),
+      stature: computeStature(computeTotalHours(projectLog)),
       trend: computeTrend(projectLog),
       quiet,
       week: computeWeek(log, page.id),
@@ -285,6 +287,50 @@ export async function writeActivityLogEntry(entry: {
       'Source': { select: { name: entry.source === 'manual' ? 'Manual' : 'Live' } },
     },
   });
+}
+
+export async function updateActivityEntry(entryId: string, fields: { note?: string; durationSec?: number }) {
+  const properties: Record<string, any> = {};
+  if (fields.note != null) {
+    properties['Status Notes'] = { rich_text: [{ text: { content: fields.note } }] };
+    properties['Name'] = { title: [{ text: { content: fields.note.slice(0, 100) || 'Logged activity' } }] };
+  }
+  if (fields.durationSec != null) {
+    properties['Duration (min)'] = { number: Math.round(fields.durationSec / 60) };
+  }
+  if (Object.keys(properties).length === 0) return;
+  await client().pages.update({ page_id: entryId, properties });
+}
+
+// Optional Claude-written copy for the skyline header and the gentle nudge.
+// Reads a Notion page (NOTION_NARRATIVE_PAGE) whose lines use the convention
+//   Skyline: <one-sentence header under the skyline>
+//   Nudge: <the gentle-nudge body>
+// so a scheduled Claude task can rewrite the page and the app picks it up.
+let narrativeCache: { at: number; value: { skyline: string | null; nudge: string | null } } | null = null;
+export async function fetchNarrative(): Promise<{ skyline: string | null; nudge: string | null }> {
+  const pageId = env('NOTION_NARRATIVE_PAGE');
+  if (!pageId || !env('NOTION_TOKEN')) return { skyline: null, nudge: null };
+  if (narrativeCache && Date.now() - narrativeCache.at < 5 * 60 * 1000) return narrativeCache.value;
+  const value: { skyline: string | null; nudge: string | null } = { skyline: null, nudge: null };
+  try {
+    let cursor: string | undefined;
+    do {
+      const res: any = await client().blocks.children.list({ block_id: pageId, start_cursor: cursor, page_size: 100 });
+      for (const block of res.results as any[]) {
+        const rt = block[block.type]?.rich_text;
+        if (!rt) continue;
+        const line = rt.map((t: any) => t.plain_text).join('').trim();
+        const m = /^(skyline|nudge)\s*:\s*(.+)$/i.exec(line);
+        if (m) value[m[1].toLowerCase() as 'skyline' | 'nudge'] = m[2].trim();
+      }
+      cursor = res.has_more ? (res.next_cursor ?? undefined) : undefined;
+    } while (cursor);
+  } catch {
+    // Page missing or not shared — fall back to app-generated copy.
+  }
+  narrativeCache = { at: Date.now(), value };
+  return value;
 }
 
 export async function writeReorderEvent(projectId: string, newPriority: number, reason: string | null) {

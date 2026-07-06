@@ -24,16 +24,23 @@ function entriesSince(entries: ActivityLogEntry[], days: number): ActivityLogEnt
   return entries.filter(e => new Date(e.createdAt).getTime() >= cutoff);
 }
 
-// activity: recency of last-edited blended with how many logged sessions
-// happened in the last 30 days, normalized to 0-1. A project with no recent
-// edits and no recent sessions settles near ~0.05 (never exactly 0, so a
-// quiet project still shows a sliver of light — "quiet, not gone").
-export function computeActivity(lastMovedAt: string | null, entries: ActivityLogEntry[]): number {
-  const recency = Math.max(0, 1 - daysSince(lastMovedAt) / 30);
+// activity: 0-1 from how many logged sessions happened in the last 30 days.
+// A project with no sessions this month is exactly 0 — its windows go dark.
+export function computeActivity(entries: ActivityLogEntry[]): number {
   const sessionCount = entriesSince(entries, 30).length;
-  const sessionScore = Math.min(1, sessionCount / 10);
-  const raw = recency * 0.6 + sessionScore * 0.4;
-  return Math.max(0.05, Math.round(raw * 100) / 100);
+  return Math.min(1, Math.round((sessionCount / 10) * 100) / 100);
+}
+
+// Sessions logged in the last 30 days — drives how many windows are lit.
+export function countRecentSessions(entries: ActivityLogEntry[]): number {
+  return entriesSince(entries, 30).length;
+}
+
+// Total time ever logged, in hours. Sessions without a duration count as a
+// nominal 15 minutes so quick undated check-ins still add a little mass.
+export function computeTotalHours(entries: ActivityLogEntry[]): number {
+  const secs = entries.reduce((sum, e) => sum + (e.durationSec || 900), 0);
+  return Math.round((secs / 3600) * 10) / 10;
 }
 
 // trend: compare activity in the last 14 days against the 14 days before that.
@@ -50,19 +57,12 @@ export function computeQuiet(lastMovedAt: string | null, thresholdDays: number):
   return daysSince(lastMovedAt) > thresholdDays;
 }
 
-// stature: relative ambition/size of the goal — tall buildings for long-horizon
-// goals (a 5-year album) even when quiet. Prefers an explicit per-project
-// "Goal horizon (days)" Notion property; falls back to spreading stated
-// priority ranks evenly so the skyline still has visual variety without it.
-export function computeStature(goalHorizonDays: number | null, rank: number, total: number): number {
-  if (goalHorizonDays != null && goalHorizonDays > 0) {
-    // 2 weeks -> ~0.1, 5 years -> ~1.0, log scale so short-horizon projects
-    // aren't squashed to nothing next to multi-year goals.
-    const years = goalHorizonDays / 365;
-    return Math.max(0.1, Math.min(1, Math.log10(years * 10 + 1) / Math.log10(51)));
-  }
-  if (total <= 1) return 0.5;
-  return Math.max(0.15, 1 - (rank - 1) / (total - 1) * 0.7);
+// stature: building size reflects time invested in the project, not priority.
+// Log scale so early hours matter visibly and a 200-hour project tops out
+// rather than dwarfing everything: 1h ≈ 0.13, 10h ≈ 0.45, 40h ≈ 0.70, 200h+ = 1.
+export function computeStature(totalHours: number): number {
+  if (totalHours <= 0) return 0.1;
+  return Math.max(0.1, Math.min(1, Math.log10(1 + totalHours) / Math.log10(201)));
 }
 
 export function computeWeek(entries: ActivityLogEntry[], projectId: string): boolean[] {

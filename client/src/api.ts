@@ -1,4 +1,4 @@
-import type { CalendarEvent, FeedEntry, Project } from './types';
+import type { CalendarEvent, FeedEntry, Narrative, Project } from './types';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -29,4 +29,7 @@ export const api = {
     projectId: string; note: string; durationSec: number; source: 'live' | 'manual';
     startedAt?: string; endedAt?: string;
   }) => req<{ ok: true }>('/activity', { method: 'POST', body: JSON.stringify(entry) }),
+  updateActivity: (id: string, fields: { note?: string; durationSec?: number }) =>
+    req<{ ok: true }>(`/activity/${id}`, { method: 'PATCH', body: JSON.stringify(fields) }),
+  narrative: () => req<Narrative>('/activity/narrative'),
 };

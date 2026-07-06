@@ -15,6 +15,8 @@ export interface Project {
   nextTarget: string;
   priority: number;
   activity: number;
+  recentSessions: number;
+  totalHours: number;
   stature: number;
   trend: Trend;
   quiet: boolean;

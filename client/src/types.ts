@@ -16,6 +16,8 @@ export interface Project {
   nextTarget: string;
   priority: number;
   activity: number;
+  recentSessions: number;
+  totalHours: number;
   stature: number;
   trend: Trend;
   quiet: boolean;
@@ -35,8 +37,15 @@ export interface CalendarEvent {
 }
 
 export interface FeedEntry {
+  id: string;
   project: string;
   note: string;
   when: string;
   dur: string;
+  durationSec: number;
+}
+
+export interface Narrative {
+  skyline: string | null;
+  nudge: string | null;
 }

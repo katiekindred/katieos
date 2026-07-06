@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { formatDuration, humanizeWhen } from '../lib/derive.js';
-import { fetchProjects, writeActivityLogEntry } from '../lib/notion.js';
+import { fetchNarrative, fetchProjects, updateActivityEntry, writeActivityLogEntry } from '../lib/notion.js';
 
 export const activityRouter = Router();
 
@@ -12,10 +12,12 @@ activityRouter.get('/feed', async (_req, res) => {
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 20);
   const feed = entries.map(e => ({
+    id: e.id,
     project: nameById.get(e.projectId) || 'Unknown',
     note: e.note,
     when: humanizeWhen(e.createdAt),
     dur: formatDuration(e.durationSec),
+    durationSec: e.durationSec,
   }));
   res.json({ feed });
 });
@@ -33,4 +35,19 @@ activityRouter.post('/', async (req, res) => {
     endedAt,
   });
   res.json({ ok: true });
+});
+
+// Body: { note?, durationSec? } — edit a logged entry after the fact.
+activityRouter.patch('/:id', async (req, res) => {
+  const { note, durationSec } = req.body;
+  await updateActivityEntry(req.params.id, {
+    note: typeof note === 'string' ? note : undefined,
+    durationSec: durationSec != null ? Number(durationSec) : undefined,
+  });
+  res.json({ ok: true });
+});
+
+// Claude-written copy for the skyline header + gentle nudge (see fetchNarrative).
+activityRouter.get('/narrative', async (_req, res) => {
+  res.json(await fetchNarrative());
 });
