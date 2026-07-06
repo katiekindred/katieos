@@ -8,7 +8,7 @@ activityRouter.get('/feed', async (_req, res) => {
   const { projects, log } = await fetchProjects();
   const nameById = new Map(projects.map(p => [p.id, p.name]));
   const entries = log
-    .slice()
+    .filter(e => nameById.has(e.projectId))
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 20);
   const feed = entries.map(e => ({
