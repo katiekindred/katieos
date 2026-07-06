@@ -82,6 +82,10 @@ export async function ensureSchema(): Promise<void> {
   const missingTaskProps: Record<string, any> = {};
   if (!taskProps['Duration (min)']) missingTaskProps['Duration (min)'] = { number: { format: 'number' } };
   if (!taskProps['Source']) missingTaskProps['Source'] = { select: { options: [{ name: 'Live' }, { name: 'Manual' }] } };
+  // The Master Task List's original project relation was deleted at some
+  // point (only a broken "Original Project" formula remains), so recreate
+  // the task→project link this app is built around.
+  if (!taskProps['Project']) missingTaskProps['Project'] = { relation: { data_source_id: projectsDsId, single_property: {} } };
   if (Object.keys(missingTaskProps).length) {
     await client().dataSources.update({ data_source_id: tasksDsId, properties: missingTaskProps });
   }
