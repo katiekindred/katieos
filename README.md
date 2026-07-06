@@ -1,25 +1,75 @@
-# CODING AGENTS: READ THIS FIRST
+# KatieOS — Life OS Dashboard
 
-This is a **handoff bundle** from Claude Design (claude.ai/design).
+A personal "Life OS" dashboard that renders your projects as a living city
+skyline. Notion is the system of record; the app is a read-heavy view with a
+thin write-back for activity logs and priority reorders. Google Calendar
+feeds the upcoming-events panel (read-only).
 
-A user mocked up designs in HTML/CSS/JS using an AI design tool, then exported this bundle so a coding agent can implement the designs for real.
+- **`client/`** — React 19 + Vite + TypeScript front end (the skyline UI)
+- **`server/`** — Express + TypeScript API that proxies Notion and Google Calendar
 
-## What you should do — IMPORTANT
+## Quick start
 
-**Read the chat transcripts first.** There are 1 chat transcript(s) in `chats/`. The transcripts show the full back-and-forth between the user and the design assistant — they tell you **what the user actually wants** and **where they landed** after iterating. Don't skip them. The final HTML files are the output, but the chat is where the intent lives.
+Run both halves side by side (two terminals):
 
-**Read `project/Dashboard.dc.html` in full.** The user had this file open when they triggered the handoff, so it's almost certainly the primary design they want built. Read it top to bottom — don't skim. Then **follow its imports**: open every file it pulls in (shared components, CSS, scripts) so you understand how the pieces fit together before you start implementing.
+```bash
+# Terminal 1 — API server on http://localhost:4000
+cd server
+npm install
+npm run dev
 
-**If anything is ambiguous, ask the user to confirm before you start implementing.** It's much cheaper to clarify scope up front than to build the wrong thing.
+# Terminal 2 — UI on http://localhost:5173 (proxies /api to :4000)
+cd client
+npm install
+npm run dev
+```
 
-## About the design files
+Then open http://localhost:5173.
 
-The design medium is **HTML/CSS/JS** — these are prototypes, not production code. Your job is to **recreate them pixel-perfectly** in whatever technology makes sense for the target codebase (React, Vue, native, whatever fits). Match the visual output; don't copy the prototype's internal structure unless it happens to fit.
+## Configuration
 
-**Don't render these files in a browser or take screenshots unless the user asks you to.** Everything you need — dimensions, colors, layout rules — is spelled out in the source. Read the HTML and CSS directly; a screenshot won't tell you anything they don't.
+The server reads `server/.env` (never committed — see `server/.env.example`
+for the template):
 
-## Bundle contents
+| Variable | What it is |
+|---|---|
+| `NOTION_TOKEN` | Internal integration token ("KatieOS" integration) |
+| `NOTION_PROJECTS_DB` | Database ID of the TIGFBAO projects board |
+| `NOTION_TASKS_DB` | Database ID of the Master Task List Table |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | OAuth client from Google Cloud Console |
+| `GOOGLE_REDIRECT_URI` | `http://localhost:4000/api/auth/google/callback` |
 
-- `README.md` — this file
-- `chats/` — conversation transcripts (read these!)
-- `project/` — the `Retrospective skyline prototype` project files (HTML prototypes, assets, components)
+### One-time setup
+
+1. **Notion sharing** — both databases must be connected to the integration:
+   open each database in Notion → `⋯` menu → **Connections** → add
+   **KatieOS**. (Database IDs are the 32-char hex string in the database URL.)
+2. **Google authorization** — with the server running, visit
+   `http://localhost:4000/api/auth/google` once and approve read-only
+   calendar access. Tokens are stored in `server/.data/` and auto-refresh.
+3. **Notion schema** — nothing manual. On first request the server adds the
+   extra properties it needs (Description, Check-in threshold, Priority,
+   Next Step Override, Last Reorder Reason on projects; Duration (min) and
+   Source on tasks). Existing rows are untouched.
+
+## How it behaves
+
+- Projects with Status `Active`, `On Hold`, or empty are shown; rows whose
+  "Work or Personal?" formula contains "work" are filtered out.
+- Tasks count as done when Status is `Done` or `Irrelevant`. The next open
+  task (earliest due date, then oldest) becomes each project's "next step".
+- Completed tasks with a Date Completed become the activity log that lights
+  the skyline windows.
+- Timer stops and manual logs write back to the Master Task List as `Done`
+  rows tagged `Live`/`Manual`; drag-reorders write `Priority` (and an
+  optional reason) back to the project pages.
+
+## Useful commands
+
+| Where | Command | Does |
+|---|---|---|
+| `server/` | `npm run dev` | API with hot reload (tsx watch) |
+| `server/` | `npm run build && npm start` | Compile to `dist/` and run |
+| `client/` | `npm run dev` | Vite dev server with HMR |
+| `client/` | `npm run build` | Typecheck + production build |
+| `client/` | `npm run lint` | Oxlint |
