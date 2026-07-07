@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { api } from '../api';
-import type { CalendarEvent, FeedEntry, Narrative, Project } from '../types';
+import type { CalendarEvent, FeedEntry, Narrative, Project, TaskLite, WeeklyReview } from '../types';
 import Skyline from './Skyline';
 
 const ACCENT = '#2f6bb0';
@@ -39,6 +39,13 @@ const input: CSSProperties = {
   padding: '9px 11px', border: '1px solid #dbe3ee', borderRadius: '9px', outline: 'none', background: '#fff',
 };
 
+const taskChip = (selected: boolean): CSSProperties => ({
+  cursor: 'pointer', fontSize: '11.5px', fontWeight: 600, padding: '6px 10px', borderRadius: '8px',
+  maxWidth: '190px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  background: selected ? 'var(--ac)' : '#fff', color: selected ? '#fff' : '#16233a',
+  border: selected ? '1px solid var(--ac)' : '1px solid #dbe3ee', transition: 'all .15s',
+});
+
 export default function Dashboard() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [calendar, setCalendar] = useState<CalendarEvent[]>([]);
@@ -68,6 +75,21 @@ export default function Dashboard() {
   const [feedDraft, setFeedDraft] = useState<{ dur: string; note: string }>({ dur: '', note: '' });
   const [saveError, setSaveError] = useState<string | null>(null);
   const [narrative, setNarrative] = useState<Narrative | null>(null);
+
+  // Open tasks per project, plus which project's task list is expanded and the
+  // task a session should attach to (null = the project's next step; 'NEW' = a
+  // fresh stub the app creates for Katie to flesh out).
+  const [tasks, setTasks] = useState<TaskLite[]>([]);
+  const [expandedTasks, setExpandedTasks] = useState<string | null>(null);
+  const [newTaskName, setNewTaskName] = useState('');
+  const [capTaskId, setCapTaskId] = useState<string | null>(null);
+  const [manTaskId, setManTaskId] = useState<string | null>(null);
+  const [review, setReview] = useState<WeeklyReview | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
+
+  const tasksFor = (projectId: string | null) =>
+    tasks.filter(t => t.projectId === projectId)
+      .sort((a, b) => (b.priorityCalc ?? -Infinity) - (a.priorityCalc ?? -Infinity));
 
   const heroRef = useRef<HTMLDivElement>(null);
   const priorityRef = useRef<HTMLDivElement>(null);
@@ -107,9 +129,17 @@ export default function Dashboard() {
     try { setNarrative(await api.narrative()); } catch { /* non-fatal */ }
   }, []);
 
+  const loadTasks = useCallback(async () => {
+    try { setTasks(await api.tasks()); } catch { /* non-fatal */ }
+  }, []);
+
+  const loadReview = useCallback(async () => {
+    try { setReview(await api.weeklyReview()); } catch { /* non-fatal */ }
+  }, []);
+
   useEffect(() => {
-    loadProjects(); loadCalendar(); loadFeed(); loadNarrative();
-    const t = setInterval(() => { loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); }, 60000);
+    loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview();
+    const t = setInterval(() => { loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview(); }, 60000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -191,9 +221,10 @@ export default function Dashboard() {
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = setInterval(() => setCapSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
   }
-  function onStart() { setCapMode('picking'); setCapSeconds(0); setCapNote(''); }
+  function onStart() { setCapMode('picking'); setCapSeconds(0); setCapNote(''); setCapTaskId(null); }
   function pick(id: string) {
     const startedAt = Date.now();
+    setCapTaskId(null);
     localStorage.setItem(LIVE_SESSION_KEY, JSON.stringify({ projectId: id, startedAt }));
     startTicking(id, startedAt);
   }
@@ -201,39 +232,63 @@ export default function Dashboard() {
   function onDiscard() {
     if (timerRef.current) clearInterval(timerRef.current);
     localStorage.removeItem(LIVE_SESSION_KEY);
-    setCapMode('idle'); setCapProject(null); setCapSeconds(0); setCapNote('');
+    setCapMode('idle'); setCapProject(null); setCapSeconds(0); setCapNote(''); setCapTaskId(null);
+  }
+  // taskId: an explicit task, or null for the project's next step, or 'NEW' to
+  // force a fresh stub. Translate that into the log request shape.
+  function attachment(taskId: string | null): { taskId?: string | null; newTask?: boolean } {
+    if (taskId === 'NEW') return { newTask: true };
+    if (taskId) return { taskId };
+    return {};
   }
   async function onSaveSession() {
     if (!capProject) return;
     const p = projects.find(pr => pr.id === capProject);
     const note = capNote || 'Worked a little.';
     const durSec = capSeconds;
-    const startedAt = capStartRef.current ? new Date(capStartRef.current).toISOString() : undefined;
+    const taskSel = capTaskId;
     localStorage.removeItem(LIVE_SESSION_KEY);
     setFeed(f => [{ id: '', project: p?.name || '', note, when: 'Just now', dur: fmtDur(durSec), durationSec: durSec }, ...f]);
-    setCapMode('idle'); setCapProject(null); setCapSeconds(0); setCapNote('');
+    setCapMode('idle'); setCapProject(null); setCapSeconds(0); setCapNote(''); setCapTaskId(null);
     try {
-      await api.logActivity({ projectId: capProject, note, durationSec: durSec, source: 'live', startedAt, endedAt: new Date().toISOString() });
+      await api.logActivity({ projectId: capProject, ...attachment(taskSel), note, durationSec: durSec, source: 'live' });
       setSaveError(null);
     } catch (e: any) {
       setSaveError(`That session didn't reach Notion (${e.message}). It's not saved — log it again below.`);
     }
-    loadProjects(); loadFeed();
+    loadProjects(); loadFeed(); loadTasks(); loadReview();
   }
   async function onAddManual() {
     if (!manProject) return;
     const p = projects.find(pr => pr.id === manProject);
     const note = manNote || 'Logged after the fact.';
     const durSec = parseDurationSec(manDur);
+    const taskSel = manTaskId;
     setFeed(f => [{ id: '', project: p?.name || '', note, when: 'Just now', dur: fmtDur(durSec), durationSec: durSec }, ...f]);
     setManDur(''); setManNote('');
     try {
-      await api.logActivity({ projectId: manProject, note, durationSec: durSec, source: 'manual' });
+      await api.logActivity({ projectId: manProject, ...attachment(taskSel), note, durationSec: durSec, source: 'manual' });
       setSaveError(null);
     } catch (e: any) {
       setSaveError(`That entry didn't reach Notion (${e.message}). It's not saved — try again.`);
     }
-    loadProjects(); loadFeed();
+    loadProjects(); loadFeed(); loadTasks(); loadReview();
+  }
+
+  // ----- tasks -----
+  async function completeTaskById(id: string) {
+    setTasks(ts => ts.filter(t => t.id !== id));
+    try { await api.completeTask(id); setSaveError(null); }
+    catch (e: any) { setSaveError(`Couldn't complete that task in Notion: ${e.message}`); loadTasks(); }
+    loadProjects(); loadFeed(); loadReview();
+  }
+  async function addTaskTo(projectId: string) {
+    const name = newTaskName.trim();
+    if (!name) return;
+    setNewTaskName('');
+    try { await api.createTask(projectId, name); setSaveError(null); }
+    catch (e: any) { setSaveError(`Couldn't add that task in Notion: ${e.message}`); }
+    loadTasks();
   }
 
   // ----- edit a logged entry -----
@@ -346,7 +401,8 @@ export default function Dashboard() {
                     onDragEnd={() => setDragId(null)}
                     style={cardStyle}>
                     {!editing ? (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '13px' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '11px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '13px' }}>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', cursor: 'grab', flex: '0 0 auto', padding: '2px' }}>
                           <span style={{ width: '14px', height: '2px', borderRadius: '2px', background: '#c2ccda' }} />
                           <span style={{ width: '14px', height: '2px', borderRadius: '2px', background: '#c2ccda' }} />
@@ -368,7 +424,25 @@ export default function Dashboard() {
                           </div>
                           <div style={{ fontSize: '11px', color: '#5a6b84' }}><b style={{ color: '#16233a' }}>{p.hours === 0 ? '0h' : `${p.hours}h`}</b> this week</div>
                         </div>
+                        <div onClick={() => setExpandedTasks(v => (v === p.id ? null : p.id))} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 600, color: expandedTasks === p.id ? 'var(--ac)' : '#8a97ab', padding: '5px 9px', border: `1px solid ${expandedTasks === p.id ? '#cdddef' : '#e2e8f1'}`, borderRadius: '8px', flex: '0 0 auto', whiteSpace: 'nowrap' }}>{tasksFor(p.id).length} task{tasksFor(p.id).length === 1 ? '' : 's'}</div>
                         <div onClick={() => startEdit(p)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 600, color: '#8a97ab', padding: '5px 9px', border: '1px solid #e2e8f1', borderRadius: '8px', flex: '0 0 auto' }}>Edit</div>
+                        </div>
+                        {expandedTasks === p.id && (
+                          <div style={{ background: '#fbfcfe', border: '1px solid #eef2f7', borderRadius: '11px', padding: '11px 13px' }}>
+                            {tasksFor(p.id).length === 0 && <div style={{ fontSize: '12px', color: '#8a97ab', paddingBottom: '4px' }}>No open tasks — add one below.</div>}
+                            {tasksFor(p.id).map(t => (
+                              <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '9px', padding: '5px 0' }}>
+                                <span onClick={() => completeTaskById(t.id)} title="Mark done in Notion" style={{ width: '16px', height: '16px', borderRadius: '5px', border: '1.5px solid #cbd6e4', cursor: 'pointer', flex: '0 0 auto', background: '#fff' }} />
+                                <span style={{ fontSize: '13px', color: '#16233a', flex: 1, minWidth: 0 }}>{t.name}</span>
+                                {t.isNextStep && <span style={{ fontSize: '9.5px', fontWeight: 700, letterSpacing: '.06em', color: 'var(--ac)', background: 'var(--ac-soft)', border: '1px solid #d4e3f5', borderRadius: '20px', padding: '2px 7px', flex: '0 0 auto' }}>NEXT</span>}
+                              </div>
+                            ))}
+                            <div style={{ display: 'flex', gap: '7px', marginTop: '8px' }}>
+                              <input value={newTaskName} onChange={e => setNewTaskName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addTaskTo(p.id)} placeholder="Add a task…" style={{ ...input, fontSize: '12.5px', padding: '7px 10px' }} />
+                              <div onClick={() => addTaskTo(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 700, color: 'var(--ac)', background: 'var(--ac-soft)', border: '1px solid #d4e3f5', borderRadius: '9px', padding: '7px 13px', whiteSpace: 'nowrap' }}>Add</div>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '9px' }}>
@@ -444,6 +518,64 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {review && (
+          <div style={{ background: '#fff', border: '1px solid #e2e8f1', borderRadius: '18px', padding: '24px', boxShadow: '0 18px 44px rgba(20,35,58,.06)' }}>
+            <div onClick={() => setReviewOpen(o => !o)} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '14px', cursor: 'pointer' }}>
+              <div>
+                <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '21px', color: '#16233a' }}>Your week in the city</div>
+                <div style={{ fontSize: '12.5px', color: '#5a6b84', marginTop: '4px' }}>
+                  <b style={{ color: '#16233a' }}>{review.totalHoursThisWeek}h</b> across {review.activeProjectsThisWeek} project{review.activeProjectsThisWeek === 1 ? '' : 's'} · {review.sessionsThisWeek} session{review.sessionsThisWeek === 1 ? '' : 's'}
+                  {review.totalHoursLastWeek > 0 && <span style={{ color: '#8a97ab' }}> · {review.totalHoursThisWeek >= review.totalHoursLastWeek ? '▲' : '▼'} vs {review.totalHoursLastWeek}h last week</span>}
+                </div>
+              </div>
+              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--ac)', whiteSpace: 'nowrap', padding: '5px 9px', border: '1px solid #d4e3f5', borderRadius: '8px' }}>{reviewOpen ? 'Hide' : 'Look back'}</div>
+            </div>
+
+            {reviewOpen && (
+              <div style={{ marginTop: '18px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
+                  {[
+                    { k: 'This week', v: `${review.totalHoursThisWeek}h` },
+                    { k: 'Sessions', v: String(review.sessionsThisWeek) },
+                    { k: 'Streak', v: `${review.longestStreakDays} day${review.longestStreakDays === 1 ? '' : 's'}` },
+                    ...(review.busiestDay ? [{ k: 'Busiest', v: `${review.busiestDay.label} · ${review.busiestDay.hours}h` }] : []),
+                  ].map(s => (
+                    <div key={s.k} style={{ flex: '1 1 120px', background: '#fbfcfe', border: '1px solid #eef2f7', borderRadius: '12px', padding: '12px 14px' }}>
+                      <div style={{ fontSize: '10.5px', letterSpacing: '.1em', textTransform: 'uppercase', color: '#8a97ab', fontWeight: 700 }}>{s.k}</div>
+                      <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '22px', color: '#16233a', marginTop: '4px' }}>{s.v}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {(review.rising.length > 0 || review.fading.length > 0 || review.wentDark.length > 0) && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                    {review.rising.map(n => <span key={`r${n}`} style={{ fontSize: '11.5px', fontWeight: 600, color: '#2a8a54', background: '#eaf7ef', border: '1px solid #cfead9', borderRadius: '20px', padding: '4px 11px' }}>▲ {n}</span>)}
+                    {review.fading.map(n => <span key={`f${n}`} style={{ fontSize: '11.5px', fontWeight: 600, color: '#a06a2e', background: '#fbf0e2', border: '1px solid #f0dcc2', borderRadius: '20px', padding: '4px 11px' }}>▼ {n}</span>)}
+                    {review.wentDark.map(n => <span key={`d${n}`} style={{ fontSize: '11.5px', fontWeight: 600, color: '#7a869a', background: '#f1f4f8', border: '1px solid #e0e7f0', borderRadius: '20px', padding: '4px 11px' }}>◗ {n} went quiet</span>)}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {review.byProject.filter(p => p.hoursThisWeek > 0 || p.hoursLastWeek > 0).slice(0, 8).map(p => {
+                    const max = Math.max(1, ...review.byProject.map(x => x.hoursThisWeek));
+                    return (
+                      <div key={p.projectId} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <div style={{ width: '128px', fontSize: '12.5px', color: '#16233a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{p.name}</div>
+                        <div style={{ flex: 1, height: '9px', background: '#eef2f7', borderRadius: '20px', overflow: 'hidden' }}>
+                          <div style={{ width: `${Math.round((p.hoursThisWeek / max) * 100)}%`, height: '100%', background: 'var(--ac)', borderRadius: '20px' }} />
+                        </div>
+                        <div style={{ width: '96px', textAlign: 'right', fontSize: '11.5px', color: '#5a6b84', flex: '0 0 auto', whiteSpace: 'nowrap' }}>
+                          <b style={{ color: '#16233a' }}>{p.hoursThisWeek}h</b>{p.delta !== 0 && <span style={{ color: p.delta > 0 ? '#2a8a54' : '#a06a2e' }}> {p.delta > 0 ? '▲' : '▼'}{Math.abs(p.delta)}</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         <div style={{ background: '#fff', border: '1px solid #e2e8f1', borderRadius: '18px', padding: '24px', boxShadow: '0 18px 44px rgba(20,35,58,.06)' }}>
           <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '21px', color: '#16233a' }}>Capture activity</div>
 
@@ -484,7 +616,18 @@ export default function Dashboard() {
                 <div style={{ marginTop: '14px' }}>
                   <div style={{ fontSize: '12px', color: '#5a6b84', marginBottom: '7px' }}>What happened?</div>
                   <input value={capNote} onChange={e => setCapNote(e.target.value)} onKeyDown={e => e.key === 'Enter' && onSaveSession()} autoFocus placeholder="e.g. Worked through the second verse" style={{ ...input, fontSize: '13px', padding: '10px 12px', borderRadius: '10px' }} />
-                  <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                  {capProject && (
+                    <div style={{ marginTop: '11px' }}>
+                      <div style={{ fontSize: '11px', color: '#5a6b84', marginBottom: '6px' }}>Log against · <span style={{ color: '#8a97ab' }}>defaults to the next step</span></div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                        {tasksFor(capProject).map(t => (
+                          <div key={t.id} onClick={() => setCapTaskId(t.id)} style={taskChip(capTaskId === t.id || (capTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</div>
+                        ))}
+                        <div onClick={() => setCapTaskId('NEW')} style={taskChip(capTaskId === 'NEW')}>+ New task</div>
+                      </div>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
                     <div onClick={onSaveSession} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '12.5px', fontWeight: 700, padding: '10px', borderRadius: '10px', background: 'var(--ac)', color: '#fff' }}>Save to Notion</div>
                     <div onClick={onDiscard} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '12.5px', fontWeight: 600, padding: '10px 14px', borderRadius: '10px', background: 'transparent', border: '1px solid #dbe3ee', color: '#5a6b84' }}>Discard</div>
                   </div>
@@ -507,7 +650,7 @@ export default function Dashboard() {
                 {projects.map(p => {
                   const active = manProject === p.id;
                   return (
-                    <div key={p.id} onClick={() => setManProject(p.id)} style={{
+                    <div key={p.id} onClick={() => { setManProject(p.id); setManTaskId(null); }} style={{
                       cursor: 'pointer', fontSize: '12px', fontWeight: 600, padding: '7px 11px', borderRadius: '9px',
                       background: active ? 'var(--ac)' : '#fff', color: active ? '#fff' : '#16233a',
                       border: active ? '1px solid var(--ac)' : '1px solid #dbe3ee', transition: 'all .15s',
@@ -515,6 +658,18 @@ export default function Dashboard() {
                   );
                 })}
               </div>
+
+              {manProject && (
+                <div style={{ marginTop: '13px' }}>
+                  <div style={{ fontSize: '11px', color: '#5a6b84', marginBottom: '6px' }}>Log against · <span style={{ color: '#8a97ab' }}>defaults to the next step</span></div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                    {tasksFor(manProject).map(t => (
+                      <div key={t.id} onClick={() => setManTaskId(t.id)} style={taskChip(manTaskId === t.id || (manTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</div>
+                    ))}
+                    <div onClick={() => setManTaskId('NEW')} style={taskChip(manTaskId === 'NEW')}>+ New task</div>
+                  </div>
+                </div>
+              )}
 
               <div style={{ display: 'flex', gap: '9px', marginTop: '13px' }}>
                 <input value={manDur} onChange={e => setManDur(e.target.value)} onKeyDown={e => e.key === 'Enter' && onAddManual()} placeholder="45m or 4h" style={{ ...input, width: '96px', borderRadius: '10px' }} />

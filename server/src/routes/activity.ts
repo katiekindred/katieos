@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { formatDuration, humanizeWhen } from '../lib/derive.js';
-import { fetchNarrative, fetchProjects, updateActivityEntry, writeActivityLogEntry } from '../lib/notion.js';
+import { fetchNarrative, fetchProjects, logSession, updateActivityEntry } from '../lib/notion.js';
 
 export const activityRouter = Router();
 
@@ -22,22 +22,25 @@ activityRouter.get('/feed', async (_req, res) => {
   res.json({ feed });
 });
 
-// Body: { projectId, note, durationSec, source: 'live'|'manual', startedAt?, endedAt? }
+// Log a work session. It attaches to a task: `taskId` if given, otherwise the
+// project's current top-priority open task, otherwise a fresh stub (unless
+// `newTask` forces a stub). Returns the task the session landed on.
+// Body: { taskId?, projectId?, note, durationSec, source: 'live'|'manual', newTask? }
 activityRouter.post('/', async (req, res) => {
-  const { projectId, note, durationSec, source, startedAt, endedAt } = req.body;
-  if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
-  await writeActivityLogEntry({
-    projectId,
+  const { taskId, projectId, note, durationSec, source, newTask } = req.body;
+  if (!taskId && !projectId) return res.status(400).json({ error: 'Missing taskId or projectId' });
+  const result = await logSession({
+    taskId: taskId || null,
+    projectId: projectId || null,
     note: note || (source === 'manual' ? 'Logged after the fact.' : 'Worked a little.'),
     durationSec: Number(durationSec) || 0,
     source: source === 'manual' ? 'manual' : 'live',
-    startedAt,
-    endedAt,
+    newTask: !!newTask,
   });
-  res.json({ ok: true });
+  res.json(result);
 });
 
-// Body: { note?, durationSec? } — edit a logged entry after the fact.
+// Body: { note?, durationSec? } — edit a logged session after the fact.
 activityRouter.patch('/:id', async (req, res) => {
   const { note, durationSec } = req.body;
   await updateActivityEntry(req.params.id, {

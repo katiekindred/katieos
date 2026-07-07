@@ -36,6 +36,39 @@ export interface ActivityLogEntry {
   createdAt: string;
 }
 
+// A lightweight open task, surfaced so the app can show a per-project task
+// list and let a session attach to a specific task.
+export interface TaskLite {
+  id: string;
+  projectId: string | null;
+  name: string;
+  status: string;
+  priorityCalc: number | null;
+  isNextStep: boolean;
+}
+
+export interface WeeklyReviewProject {
+  projectId: string;
+  name: string;
+  hoursThisWeek: number;
+  hoursLastWeek: number;
+  delta: number;
+  trend: Trend;
+}
+
+export interface WeeklyReview {
+  totalHoursThisWeek: number;
+  totalHoursLastWeek: number;
+  sessionsThisWeek: number;
+  activeProjectsThisWeek: number;
+  longestStreakDays: number;
+  busiestDay: { label: string; hours: number } | null;
+  byProject: WeeklyReviewProject[];
+  rising: string[];
+  fading: string[];
+  wentDark: string[];
+}
+
 export interface ReorderEvent {
   projectId: string;
   fromRank: number;

@@ -1,4 +1,4 @@
-import type { CalendarEvent, FeedEntry, Narrative, Project } from './types';
+import type { CalendarEvent, FeedEntry, Narrative, Project, TaskLite, WeeklyReview } from './types';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -24,12 +24,21 @@ export const api = {
 
   calendar: () => req<{ events: CalendarEvent[] }>('/calendar').then(r => r.events),
 
+  tasks: () => req<{ tasks: TaskLite[] }>('/tasks').then(r => r.tasks),
+  createTask: (projectId: string, name: string) =>
+    req<{ id: string }>('/tasks', { method: 'POST', body: JSON.stringify({ projectId, name }) }),
+  completeTask: (id: string) => req<{ ok: true }>(`/tasks/${id}/complete`, { method: 'POST' }),
+
   feed: () => req<{ feed: FeedEntry[] }>('/activity/feed').then(r => r.feed),
+  // A session attaches to a task: an explicit taskId, else the project's current
+  // next step, else a fresh stub (newTask). Returns the task it landed on.
   logActivity: (entry: {
-    projectId: string; note: string; durationSec: number; source: 'live' | 'manual';
-    startedAt?: string; endedAt?: string;
-  }) => req<{ ok: true }>('/activity', { method: 'POST', body: JSON.stringify(entry) }),
+    projectId?: string; taskId?: string | null; newTask?: boolean;
+    note: string; durationSec: number; source: 'live' | 'manual';
+  }) => req<{ taskId: string }>('/activity', { method: 'POST', body: JSON.stringify(entry) }),
   updateActivity: (id: string, fields: { note?: string; durationSec?: number }) =>
     req<{ ok: true }>(`/activity/${id}`, { method: 'PATCH', body: JSON.stringify(fields) }),
   narrative: () => req<Narrative>('/activity/narrative'),
+
+  weeklyReview: () => req<WeeklyReview>('/review/weekly'),
 };

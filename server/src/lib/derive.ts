@@ -1,4 +1,4 @@
-import type { ActivityLogEntry, Trend } from '../types.js';
+import type { ActivityLogEntry, Trend, WeeklyReview } from '../types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -133,4 +133,134 @@ export function formatDuration(sec: number): string {
   if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
+}
+
+// ---- Session lines ----------------------------------------------------------
+// A logged session lives as one line in its task's Notion page body, so the
+// task page doubles as a human-readable work journal. The lines are also the
+// app's own record, so they use a strict, parseable shape led by a marker that
+// tells app-written lines apart from any prose Katie adds to the same page:
+//
+//   ▸ 2026-07-07T16:44:54.000Z · 45m · worked the second verse · Live
+//
+// Fields are " · "-separated: ISO timestamp, minutes, note, then the source
+// label. The note has its own delimiters flattened so parsing stays simple.
+
+export const SESSION_MARKER = '▸';
+const FIELD_SEP = ' · ';
+
+export interface SessionLine {
+  createdAt: string;
+  durationSec: number;
+  note: string;
+  source: 'live' | 'manual';
+}
+
+export function formatSessionLine(s: SessionLine): string {
+  const mins = Math.round((s.durationSec || 0) / 60);
+  const note = (s.note || '').replace(/ · /g, ' - ').trim() || '—';
+  const label = s.source === 'manual' ? 'Manual' : 'Live';
+  return `${SESSION_MARKER} ${new Date(s.createdAt).toISOString()}${FIELD_SEP}${mins}m${FIELD_SEP}${note}${FIELD_SEP}${label}`;
+}
+
+export function parseSessionLine(raw: string): SessionLine | null {
+  const line = (raw || '').trim();
+  if (!line.startsWith(SESSION_MARKER)) return null;
+  const parts = line.slice(SESSION_MARKER.length).trim().split(FIELD_SEP);
+  if (parts.length < 2) return null;
+  const when = new Date(parts[0].trim());
+  if (isNaN(when.getTime())) return null;
+  const minMatch = /(\d+(?:\.\d+)?)\s*m/i.exec(parts[1]);
+  const durationSec = minMatch ? Math.round(parseFloat(minMatch[1]) * 60) : 0;
+  const rest = parts.slice(2);
+  let source: 'live' | 'manual' = 'live';
+  if (rest.length && /^(live|manual)$/i.test(rest[rest.length - 1].trim())) {
+    source = rest.pop()!.trim().toLowerCase() === 'manual' ? 'manual' : 'live';
+  }
+  const note = rest.join(FIELD_SEP).trim();
+  return { createdAt: when.toISOString(), durationSec, note, source };
+}
+
+// ---- Weekly reflection ------------------------------------------------------
+// Pure derivation over the activity log: this week vs. the week before, who
+// rose, who faded, who went dark, plus a couple of momentum stats. Read-only —
+// touches no Notion data.
+
+interface ReviewProjectInput { id: string; name: string; quiet: boolean }
+
+function hoursIn(entries: ActivityLogEntry[], from: number, to: number): number {
+  const secs = entries.reduce((sum, e) => {
+    const t = new Date(e.createdAt).getTime();
+    return t >= from && t < to ? sum + (e.durationSec || 0) : sum;
+  }, 0);
+  return Math.round((secs / 3600) * 10) / 10;
+}
+
+export function computeWeeklyReview(
+  log: ActivityLogEntry[],
+  projects: ReviewProjectInput[],
+  now: number = Date.now(),
+): WeeklyReview {
+  const thisFrom = now - 7 * DAY_MS;
+  const priorFrom = now - 14 * DAY_MS;
+  const end = now + 1; // inclusive of a session logged at this instant
+  const nameById = new Map(projects.map(p => [p.id, p.name]));
+
+  const byProject = projects.map(p => {
+    const entries = log.filter(e => e.projectId === p.id);
+    const hoursThisWeek = hoursIn(entries, thisFrom, end);
+    const hoursLastWeek = hoursIn(entries, priorFrom, thisFrom);
+    const delta = Math.round((hoursThisWeek - hoursLastWeek) * 10) / 10;
+    const trend: Trend = hoursThisWeek > hoursLastWeek ? 'rising'
+      : hoursThisWeek < hoursLastWeek ? 'fading' : 'steady';
+    return { projectId: p.id, name: p.name, hoursThisWeek, hoursLastWeek, delta, trend };
+  });
+
+  const thisWeek = log.filter(e => {
+    const t = new Date(e.createdAt).getTime();
+    return t >= thisFrom && t < end;
+  });
+
+  // Busiest calendar day in the window.
+  const dayHours = new Map<string, number>();
+  for (const e of thisWeek) {
+    const d = new Date(e.createdAt);
+    const key = d.toISOString().slice(0, 10);
+    dayHours.set(key, (dayHours.get(key) || 0) + (e.durationSec || 0) / 3600);
+  }
+  let busiestDay: WeeklyReview['busiestDay'] = null;
+  for (const [key, hrs] of dayHours) {
+    if (!busiestDay || hrs > busiestDay.hours) {
+      busiestDay = { label: new Date(key + 'T12:00:00').toLocaleDateString([], { weekday: 'long' }), hours: Math.round(hrs * 10) / 10 };
+    }
+  }
+
+  // Longest run of consecutive days (ending today) with any logged session.
+  const touchedDays = new Set([...dayHours.keys()]);
+  for (const e of log) touchedDays.add(new Date(e.createdAt).toISOString().slice(0, 10));
+  let longestStreakDays = 0;
+  for (let i = 0; i < 60; i++) {
+    const key = new Date(now - i * DAY_MS).toISOString().slice(0, 10);
+    if (touchedDays.has(key)) longestStreakDays++;
+    else break;
+  }
+
+  const rising = byProject.filter(p => p.hoursThisWeek > 0 && p.delta > 0).sort((a, b) => b.delta - a.delta).map(p => p.name);
+  const fading = byProject.filter(p => p.hoursLastWeek > 0 && p.delta < 0).sort((a, b) => a.delta - b.delta).map(p => p.name);
+  const wentDark = projects
+    .filter(p => p.quiet && log.some(e => e.projectId === p.id))
+    .map(p => nameById.get(p.id) || p.name);
+
+  return {
+    totalHoursThisWeek: hoursIn(log, thisFrom, end),
+    totalHoursLastWeek: hoursIn(log, priorFrom, thisFrom),
+    sessionsThisWeek: thisWeek.length,
+    activeProjectsThisWeek: byProject.filter(p => p.hoursThisWeek > 0).length,
+    longestStreakDays,
+    busiestDay,
+    byProject: byProject.sort((a, b) => b.hoursThisWeek - a.hoursThisWeek),
+    rising,
+    fading,
+    wentDark,
+  };
 }
