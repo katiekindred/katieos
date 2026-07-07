@@ -43,6 +43,28 @@ export interface TaskLite {
   status: string;
   priorityCalc: number | null;
   isNextStep: boolean;
+  importanceId: string | null;
+  urgencyId: string | null;
+  statusNotes: string;
+}
+
+export interface FieldUpdate {
+  name: string;
+  type: 'select' | 'status' | 'multi_select' | 'text';
+  optionIds?: string[];
+  text?: string;
+}
+
+export interface FieldOption {
+  id: string;
+  name: string;
+  color: string;
+}
+
+export interface PickerField {
+  name: string;
+  type: 'select' | 'status' | 'multi_select';
+  options: FieldOption[];
 }
 
 export interface WeeklyReviewProject {

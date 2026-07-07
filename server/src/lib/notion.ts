@@ -1,5 +1,5 @@
 import { Client } from '@notionhq/client';
-import type { ActivityLogEntry, Project, TaskLite, WeeklyReview } from '../types.js';
+import type { ActivityLogEntry, FieldOption, FieldUpdate, PickerField, Project, TaskLite, WeeklyReview } from '../types.js';
 import {
   computeActivity, computeHoursThisWeek, computeQuiet, computeStature,
   computeTotalHours, computeTrend, computeWeek, computeWeeklyReview, countRecentSessions,
@@ -171,6 +171,8 @@ interface TaskRow {
   dateCompleted: string | null;
   durationMin: number | null;
   priorityCalc: number | null;
+  importanceId: string | null;
+  urgencyId: string | null;
   source: string;
   createdTime: string;
 }
@@ -191,6 +193,8 @@ async function fetchAllTasks(): Promise<TaskRow[]> {
       dateCompleted: dateStart(props['Date Completed']),
       durationMin: num(props['Duration (min)']),
       priorityCalc: formulaNumber(props['Priority Calculation']),
+      importanceId: props['Importance']?.select?.id ?? null,
+      urgencyId: props['Urgency']?.select?.id ?? null,
       source: props['Source']?.select?.name || 'notion-task',
       createdTime: page.created_time,
     };
@@ -420,7 +424,53 @@ export async function fetchOpenTasks(): Promise<TaskLite[]> {
   return open.map(t => ({
     id: t.id, projectId: t.projectId, name: t.name, status: t.status,
     priorityCalc: t.priorityCalc, isNextStep: nextStepIds.has(t.id),
+    importanceId: t.importanceId, urgencyId: t.urgencyId, statusNotes: t.statusNotes,
   }));
+}
+
+// Write field values back to a task (Part A4). Select/status are set by option
+// id (safer against renames); an empty option list clears them; text writes the
+// rich_text field. Used to set Importance / Urgency / Status Notes from the
+// logger, on both new stubs and existing tasks.
+export async function updateTaskFields(taskId: string, updates: FieldUpdate[]): Promise<void> {
+  const properties: Record<string, any> = {};
+  for (const u of updates) {
+    if (u.type === 'select') {
+      properties[u.name] = { select: u.optionIds?.[0] ? { id: u.optionIds[0] } : null };
+    } else if (u.type === 'status') {
+      properties[u.name] = { status: u.optionIds?.[0] ? { id: u.optionIds[0] } : null };
+    } else if (u.type === 'multi_select') {
+      properties[u.name] = { multi_select: (u.optionIds || []).map(id => ({ id })) };
+    } else if (u.type === 'text') {
+      properties[u.name] = { rich_text: u.text ? [{ text: { content: u.text } }] : [] };
+    }
+  }
+  if (Object.keys(properties).length === 0) return;
+  await client().pages.update({ page_id: taskId, properties });
+  bustCache();
+}
+
+// The task DB's select / status / multi_select properties with their options
+// and Notion colors, read live from the data-source schema (Part A2). Cached for
+// the session — it rarely changes and each read is a round trip.
+let fieldSchemaCache: { at: number; fields: PickerField[] } | null = null;
+export async function fetchTaskFieldSchema(): Promise<PickerField[]> {
+  if (fieldSchemaCache && Date.now() - fieldSchemaCache.at < 5 * 60 * 1000) return fieldSchemaCache.fields;
+  const dsId = await resolveDataSourceId(TASKS_DB());
+  const ds = await client().dataSources.retrieve({ data_source_id: dsId });
+  const props = (ds as any).properties || {};
+  const fields: PickerField[] = [];
+  for (const [name, def] of Object.entries<any>(props)) {
+    const type = def?.type;
+    if (type === 'select' || type === 'status' || type === 'multi_select') {
+      const options: FieldOption[] = (def[type]?.options || []).map((o: any) => ({
+        id: o.id, name: o.name, color: o.color || 'default',
+      }));
+      fields.push({ name, type, options });
+    }
+  }
+  fieldSchemaCache = { at: Date.now(), fields };
+  return fields;
 }
 
 // Read-only weekly reflection derived entirely from the activity log.

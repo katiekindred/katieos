@@ -36,6 +36,22 @@ export interface ActivityLogEntry {
   createdAt: string;
 }
 
+// A Notion select/status/multi-select option, with its Notion color name so the
+// UI can render it as a chip in the exact Notion color.
+export interface FieldOption {
+  id: string;
+  name: string;
+  color: string;
+}
+
+// A pickable Notion property (select / status / multi_select) with its options,
+// read live from the data-source schema.
+export interface PickerField {
+  name: string;
+  type: 'select' | 'status' | 'multi_select';
+  options: FieldOption[];
+}
+
 // A lightweight open task, surfaced so the app can show a per-project task
 // list and let a session attach to a specific task.
 export interface TaskLite {
@@ -45,6 +61,20 @@ export interface TaskLite {
   status: string;
   priorityCalc: number | null;
   isNextStep: boolean;
+  // Current values of the fields the logger can set, so they populate when the
+  // task already exists. Select values are option ids; statusNotes is text.
+  importanceId: string | null;
+  urgencyId: string | null;
+  statusNotes: string;
+}
+
+// One field write from the logger. Select/status carry an option id list
+// (empty = clear); text carries a string.
+export interface FieldUpdate {
+  name: string;
+  type: 'select' | 'status' | 'multi_select' | 'text';
+  optionIds?: string[];
+  text?: string;
 }
 
 export interface WeeklyReviewProject {

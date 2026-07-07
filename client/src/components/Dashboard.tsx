@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { api } from '../api';
-import type { CalendarEvent, FeedEntry, Narrative, Project, TaskLite, WeeklyReview } from '../types';
+import type { CalendarEvent, FeedEntry, FieldUpdate, Narrative, PickerField, Project, TaskLite, WeeklyReview } from '../types';
+import NotionFieldDropdown from './NotionFieldDropdown';
 import Skyline from './Skyline';
 
 const ACCENT = '#2f6bb0';
@@ -46,6 +47,49 @@ const taskChip = (selected: boolean): CSSProperties => ({
   border: selected ? '1px solid var(--ac)' : '1px solid #dbe3ee', transition: 'all .15s',
 });
 
+// The Notion fields the logger can set on a task: Importance + Urgency (colored
+// option pickers) and Status Notes (free text). Populated from the task when it
+// exists, blank for a new stub.
+interface Fields { importance: string | null; urgency: string | null; statusNotes: string }
+const BLANK_FIELDS: Fields = { importance: null, urgency: null, statusNotes: '' };
+const fieldLabel: CSSProperties = { fontSize: '11px', color: '#5a6b84', marginBottom: '5px' };
+
+// Module-scope so the Status Notes text input keeps focus across keystrokes.
+function TaskFieldEditors({ schema, fields, onChange }: { schema: PickerField[]; fields: Fields; onChange: (f: Fields) => void }) {
+  if (schema.length === 0) return null;
+  const importance = schema.find(f => f.name === 'Importance');
+  const urgency = schema.find(f => f.name === 'Urgency');
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '12px' }}>
+      {importance && (
+        <div>
+          <div style={fieldLabel}>Importance</div>
+          <NotionFieldDropdown field={importance} value={fields.importance ? [fields.importance] : []} onChange={ids => onChange({ ...fields, importance: ids[0] ?? null })} />
+        </div>
+      )}
+      {urgency && (
+        <div>
+          <div style={fieldLabel}>Urgency</div>
+          <NotionFieldDropdown field={urgency} value={fields.urgency ? [fields.urgency] : []} onChange={ids => onChange({ ...fields, urgency: ids[0] ?? null })} />
+        </div>
+      )}
+      <div>
+        <div style={fieldLabel}>Status notes</div>
+        <input value={fields.statusNotes} onChange={e => onChange({ ...fields, statusNotes: e.target.value })} placeholder="Where it's at / why it's parked…" style={input} />
+      </div>
+    </div>
+  );
+}
+
+// Which fields differ from the task's current values — only those get written.
+function fieldUpdates(draft: Fields, orig: Fields): FieldUpdate[] {
+  const u: FieldUpdate[] = [];
+  if ((draft.importance ?? null) !== (orig.importance ?? null)) u.push({ name: 'Importance', type: 'select', optionIds: draft.importance ? [draft.importance] : [] });
+  if ((draft.urgency ?? null) !== (orig.urgency ?? null)) u.push({ name: 'Urgency', type: 'select', optionIds: draft.urgency ? [draft.urgency] : [] });
+  if ((draft.statusNotes ?? '') !== (orig.statusNotes ?? '')) u.push({ name: 'Status Notes', type: 'text', text: draft.statusNotes });
+  return u;
+}
+
 export default function Dashboard() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [calendar, setCalendar] = useState<CalendarEvent[]>([]);
@@ -87,9 +131,30 @@ export default function Dashboard() {
   const [review, setReview] = useState<WeeklyReview | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
 
+  // Notion field schema (options + colors) and the per-flow field drafts, with
+  // the task's original values so only real changes get written on save.
+  const [schema, setSchema] = useState<PickerField[]>([]);
+  const [capFields, setCapFields] = useState<Fields>(BLANK_FIELDS);
+  const [capOrig, setCapOrig] = useState<Fields>(BLANK_FIELDS);
+  const [manFields, setManFields] = useState<Fields>(BLANK_FIELDS);
+  const [manOrig, setManOrig] = useState<Fields>(BLANK_FIELDS);
+
   const tasksFor = (projectId: string | null) =>
     tasks.filter(t => t.projectId === projectId)
       .sort((a, b) => (b.priorityCalc ?? -Infinity) - (a.priorityCalc ?? -Infinity));
+
+  // Current field values of a task (for populating the editors), or blanks.
+  const fieldsOfTask = (taskId: string | null): Fields => {
+    const t = taskId ? tasks.find(x => x.id === taskId) : null;
+    return t ? { importance: t.importanceId, urgency: t.urgencyId, statusNotes: t.statusNotes } : { ...BLANK_FIELDS };
+  };
+  // The task a session will actually land on: an explicit pick, else the
+  // project's next step, else none (a new stub will be created).
+  const effectiveTaskId = (sel: string | null, projectId: string | null): string | null => {
+    if (sel === 'NEW') return null;
+    if (sel) return sel;
+    return tasks.find(t => t.projectId === projectId && t.isNextStep)?.id ?? null;
+  };
 
   const heroRef = useRef<HTMLDivElement>(null);
   const priorityRef = useRef<HTMLDivElement>(null);
@@ -137,12 +202,29 @@ export default function Dashboard() {
     try { setReview(await api.weeklyReview()); } catch { /* non-fatal */ }
   }, []);
 
+  const loadSchema = useCallback(async () => {
+    try { setSchema(await api.taskSchema()); } catch { /* non-fatal */ }
+  }, []);
+
   useEffect(() => {
-    loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview();
+    loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview(); loadSchema();
     const t = setInterval(() => { loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview(); }, 60000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Populate the manual-log field editors once, when the default project and its
+  // tasks have loaded. After that, project/task clicks drive repopulation, so a
+  // background refresh never clobbers what you're editing.
+  const manInitRef = useRef(false);
+  useEffect(() => {
+    if (!manInitRef.current && manProject && tasks.length) {
+      manInitRef.current = true;
+      const f = fieldsOfTask(effectiveTaskId(null, manProject));
+      setManFields(f); setManOrig(f);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [manProject, tasks]);
 
   useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
 
@@ -228,7 +310,29 @@ export default function Dashboard() {
     localStorage.setItem(LIVE_SESSION_KEY, JSON.stringify({ projectId: id, startedAt }));
     startTicking(id, startedAt);
   }
-  function onStop() { if (timerRef.current) clearInterval(timerRef.current); setCapMode('noting'); }
+  function onStop() {
+    if (timerRef.current) clearInterval(timerRef.current);
+    const f = fieldsOfTask(effectiveTaskId(capTaskId, capProject));
+    setCapFields(f); setCapOrig(f);
+    setCapMode('noting');
+  }
+  // Pick which task a session attaches to, repopulating the field editors from
+  // that task's current values (or blanks for a new stub).
+  function chooseCapTask(sel: string | null) {
+    setCapTaskId(sel);
+    const f = fieldsOfTask(effectiveTaskId(sel, capProject));
+    setCapFields(f); setCapOrig(f);
+  }
+  function chooseManTask(sel: string | null) {
+    setManTaskId(sel);
+    const f = fieldsOfTask(effectiveTaskId(sel, manProject));
+    setManFields(f); setManOrig(f);
+  }
+  function chooseManProject(id: string) {
+    setManProject(id); setManTaskId(null);
+    const f = fieldsOfTask(effectiveTaskId(null, id));
+    setManFields(f); setManOrig(f);
+  }
   function onDiscard() {
     if (timerRef.current) clearInterval(timerRef.current);
     localStorage.removeItem(LIVE_SESSION_KEY);
@@ -247,11 +351,15 @@ export default function Dashboard() {
     const note = capNote || 'Worked a little.';
     const durSec = capSeconds;
     const taskSel = capTaskId;
+    const fDraft = capFields, fOrig = capOrig;
     localStorage.removeItem(LIVE_SESSION_KEY);
     setFeed(f => [{ id: '', project: p?.name || '', note, when: 'Just now', dur: fmtDur(durSec), durationSec: durSec }, ...f]);
     setCapMode('idle'); setCapProject(null); setCapSeconds(0); setCapNote(''); setCapTaskId(null);
+    setCapFields(BLANK_FIELDS); setCapOrig(BLANK_FIELDS);
     try {
-      await api.logActivity({ projectId: capProject, ...attachment(taskSel), note, durationSec: durSec, source: 'live' });
+      const res = await api.logActivity({ projectId: capProject, ...attachment(taskSel), note, durationSec: durSec, source: 'live' });
+      const updates = fieldUpdates(fDraft, fOrig);
+      if (res?.taskId && updates.length) await api.updateTaskFields(res.taskId, updates);
       setSaveError(null);
     } catch (e: any) {
       setSaveError(`That session didn't reach Notion (${e.message}). It's not saved — log it again below.`);
@@ -264,14 +372,18 @@ export default function Dashboard() {
     const note = manNote || 'Logged after the fact.';
     const durSec = parseDurationSec(manDur);
     const taskSel = manTaskId;
+    const fDraft = manFields, fOrig = manOrig;
     setFeed(f => [{ id: '', project: p?.name || '', note, when: 'Just now', dur: fmtDur(durSec), durationSec: durSec }, ...f]);
     setManDur(''); setManNote('');
     try {
-      await api.logActivity({ projectId: manProject, ...attachment(taskSel), note, durationSec: durSec, source: 'manual' });
+      const res = await api.logActivity({ projectId: manProject, ...attachment(taskSel), note, durationSec: durSec, source: 'manual' });
+      const updates = fieldUpdates(fDraft, fOrig);
+      if (res?.taskId && updates.length) await api.updateTaskFields(res.taskId, updates);
       setSaveError(null);
     } catch (e: any) {
       setSaveError(`That entry didn't reach Notion (${e.message}). It's not saved — try again.`);
     }
+    setManFields(BLANK_FIELDS); setManOrig(BLANK_FIELDS);
     loadProjects(); loadFeed(); loadTasks(); loadReview();
   }
 
@@ -621,10 +733,11 @@ export default function Dashboard() {
                       <div style={{ fontSize: '11px', color: '#5a6b84', marginBottom: '6px' }}>Log against · <span style={{ color: '#8a97ab' }}>defaults to the next step</span></div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                         {tasksFor(capProject).map(t => (
-                          <div key={t.id} onClick={() => setCapTaskId(t.id)} style={taskChip(capTaskId === t.id || (capTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</div>
+                          <div key={t.id} onClick={() => chooseCapTask(t.id)} style={taskChip(capTaskId === t.id || (capTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</div>
                         ))}
-                        <div onClick={() => setCapTaskId('NEW')} style={taskChip(capTaskId === 'NEW')}>+ New task</div>
+                        <div onClick={() => chooseCapTask('NEW')} style={taskChip(capTaskId === 'NEW')}>+ New task</div>
                       </div>
+                      <TaskFieldEditors schema={schema} fields={capFields} onChange={setCapFields} />
                     </div>
                   )}
                   <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
@@ -650,7 +763,7 @@ export default function Dashboard() {
                 {projects.map(p => {
                   const active = manProject === p.id;
                   return (
-                    <div key={p.id} onClick={() => { setManProject(p.id); setManTaskId(null); }} style={{
+                    <div key={p.id} onClick={() => chooseManProject(p.id)} style={{
                       cursor: 'pointer', fontSize: '12px', fontWeight: 600, padding: '7px 11px', borderRadius: '9px',
                       background: active ? 'var(--ac)' : '#fff', color: active ? '#fff' : '#16233a',
                       border: active ? '1px solid var(--ac)' : '1px solid #dbe3ee', transition: 'all .15s',
@@ -664,10 +777,11 @@ export default function Dashboard() {
                   <div style={{ fontSize: '11px', color: '#5a6b84', marginBottom: '6px' }}>Log against · <span style={{ color: '#8a97ab' }}>defaults to the next step</span></div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                     {tasksFor(manProject).map(t => (
-                      <div key={t.id} onClick={() => setManTaskId(t.id)} style={taskChip(manTaskId === t.id || (manTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</div>
+                      <div key={t.id} onClick={() => chooseManTask(t.id)} style={taskChip(manTaskId === t.id || (manTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</div>
                     ))}
-                    <div onClick={() => setManTaskId('NEW')} style={taskChip(manTaskId === 'NEW')}>+ New task</div>
+                    <div onClick={() => chooseManTask('NEW')} style={taskChip(manTaskId === 'NEW')}>+ New task</div>
                   </div>
+                  <TaskFieldEditors schema={schema} fields={manFields} onChange={setManFields} />
                 </div>
               )}
 
