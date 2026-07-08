@@ -1,8 +1,9 @@
 import { Client } from '@notionhq/client';
-import type { ActivityLogEntry, Project } from '../types.js';
+import type { ActivityLogEntry, FieldOption, FieldUpdate, PickerField, Project, TaskLite, WeeklyReview } from '../types.js';
 import {
   computeActivity, computeHoursThisWeek, computeQuiet, computeStature,
-  computeTrend, computeWeek, findRecovery, parseThresholdDays
+  computeTotalHours, computeTrend, computeWeek, computeWeeklyReview, countRecentSessions,
+  findRecovery, formatSessionLine, parseSessionLine, parseThresholdDays
 } from './derive.js';
 
 function env(name: string): string | undefined {
@@ -112,6 +113,23 @@ function dateStart(prop: any): string | null {
 function relationIds(prop: any): string[] {
   return (prop?.relation || []).map((r: any) => r.id);
 }
+// Priority Calculation is a formula returning a number; read the formula value,
+// falling back to a plain number property if the shape ever changes.
+function formulaNumber(prop: any): number | null {
+  const f = prop?.formula;
+  if (f && f.type === 'number' && typeof f.number === 'number') return f.number;
+  return typeof prop?.number === 'number' ? prop.number : null;
+}
+// The plain text of a paragraph / bulleted-list block, wherever it carries its
+// rich_text. Used to read session lines back out of a task's page body.
+function blockText(block: any): string {
+  const body = block?.[block?.type];
+  const arr = body?.rich_text || [];
+  return arr.map((t: any) => t.plain_text ?? t.text?.content ?? '').join('');
+}
+function paragraph(content: string) {
+  return { object: 'block' as const, type: 'paragraph' as const, paragraph: { rich_text: [{ type: 'text' as const, text: { content } }] } };
+}
 
 // "Work or Personal?" is a formula on TIGFBAO. Its exact return type/casing
 // isn't queryable via schema alone, so read whatever value comes back and
@@ -152,6 +170,9 @@ interface TaskRow {
   due: string | null;
   dateCompleted: string | null;
   durationMin: number | null;
+  priorityCalc: number | null;
+  importanceId: string | null;
+  urgencyId: string | null;
   source: string;
   createdTime: string;
 }
@@ -171,6 +192,9 @@ async function fetchAllTasks(): Promise<TaskRow[]> {
       due: dateStart(props['Due']),
       dateCompleted: dateStart(props['Date Completed']),
       durationMin: num(props['Duration (min)']),
+      priorityCalc: formulaNumber(props['Priority Calculation']),
+      importanceId: props['Importance']?.select?.id ?? null,
+      urgencyId: props['Urgency']?.select?.id ?? null,
       source: props['Source']?.select?.name || 'notion-task',
       createdTime: page.created_time,
     };
@@ -179,41 +203,95 @@ async function fetchAllTasks(): Promise<TaskRow[]> {
 
 const DONE_STATUSES = new Set(['Done', 'Irrelevant']);
 
-function tasksToActivityLog(tasks: TaskRow[]): ActivityLogEntry[] {
-  return tasks
-    .filter(t => t.projectId && t.dateCompleted)
-    .map(t => ({
-      id: t.id,
-      projectId: t.projectId as string,
-      startedAt: null,
-      endedAt: t.dateCompleted,
-      durationSec: (t.durationMin || 0) * 60,
-      note: t.statusNotes || t.name,
-      source: (t.source === 'Live' ? 'live' : t.source === 'Manual' ? 'manual' : 'notion-task') as ActivityLogEntry['source'],
-      createdAt: t.dateCompleted as string,
-    }));
+// A task the app has logged time against carries its sessions as marked lines
+// in its Notion page body (see formatSessionLine). Read those back out.
+async function readSessionBlocks(taskId: string) {
+  const out: { blockId: string; createdAt: string; durationSec: number; note: string; source: 'live' | 'manual' }[] = [];
+  let cursor: string | undefined;
+  do {
+    const res = await client().blocks.children.list({ block_id: taskId, start_cursor: cursor, page_size: 100 });
+    for (const b of res.results as any[]) {
+      const parsed = parseSessionLine(blockText(b));
+      if (parsed) out.push({ blockId: b.id, ...parsed });
+    }
+    cursor = res.has_more ? (res.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+  return out;
 }
 
-function pickNextStep(tasks: TaskRow[], projectId: string): { step: string; note: string; target: string } | null {
+// The activity log that lights the skyline. Each logged *session* (a body line
+// on an open, in-progress task) is one dated entry, so live work shows on the
+// day it happened. A completed task instead contributes a single entry on its
+// completion date carrying its total time — which also covers legacy per-session
+// rows and tasks finished by hand. Only open, app-touched tasks have their page
+// bodies read, keeping Notion calls proportional to what's currently in flight.
+async function buildActivityLog(tasks: TaskRow[]): Promise<ActivityLogEntry[]> {
+  const openTouched = tasks.filter(t =>
+    t.projectId && !DONE_STATUSES.has(t.status) && ((t.durationMin ?? 0) > 0 || t.source === 'Live' || t.source === 'Manual'));
+  const sessionArrays = await Promise.all(openTouched.map(t => readSessionBlocks(t.id)));
+  const sessionsByTask = new Map(openTouched.map((t, i) => [t.id, sessionArrays[i]]));
+
+  const log: ActivityLogEntry[] = [];
+  for (const t of tasks) {
+    if (!t.projectId) continue;
+    const sessions = sessionsByTask.get(t.id);
+    if (sessions && sessions.length) {
+      for (const s of sessions) {
+        log.push({
+          id: `${t.id}:${s.blockId}`, projectId: t.projectId, startedAt: null,
+          endedAt: s.createdAt, durationSec: s.durationSec, note: s.note || t.name,
+          source: s.source, createdAt: s.createdAt,
+        });
+      }
+    } else if (t.dateCompleted) {
+      log.push({
+        id: t.id, projectId: t.projectId, startedAt: null, endedAt: t.dateCompleted,
+        durationSec: (t.durationMin || 0) * 60, note: t.statusNotes || t.name,
+        source: (t.source === 'Live' ? 'live' : t.source === 'Manual' ? 'manual' : 'notion-task'),
+        createdAt: t.dateCompleted,
+      });
+    }
+  }
+  return log;
+}
+
+// The next step is the highest-`Priority Calculation` open task — the same key
+// Katie's Master Task List "Priority View" sorts by and works top-down. The
+// Dependency Hit demotion is already baked into that number, so blocked tasks
+// sink on their own; no due-date logic (that column is retired).
+function topOpenTask(tasks: TaskRow[], projectId: string): TaskRow | null {
   const open = tasks.filter(t => t.projectId === projectId && !DONE_STATUSES.has(t.status));
   if (open.length === 0) return null;
   open.sort((a, b) => {
-    if (a.due && b.due) return new Date(a.due).getTime() - new Date(b.due).getTime();
-    if (a.due) return -1;
-    if (b.due) return 1;
+    const pa = a.priorityCalc, pb = b.priorityCalc;
+    if (pa != null && pb != null && pa !== pb) return pb - pa;
+    if (pa != null && pb == null) return -1;
+    if (pb != null && pa == null) return 1;
     return new Date(a.createdTime).getTime() - new Date(b.createdTime).getTime();
   });
-  const top = open[0];
-  const target = top.due ? new Date(top.due).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '—';
-  return { step: top.name, note: top.statusNotes || 'From your Master Task List', target };
+  return open[0];
 }
+
+function pickNextStep(tasks: TaskRow[], projectId: string): { step: string; note: string; target: string } | null {
+  const top = topOpenTask(tasks, projectId);
+  if (!top) return null;
+  return { step: top.name, note: top.statusNotes || 'From your Master Task List', target: '' };
+}
+
+// Reading task page bodies makes fetchProjects heavier, and several routes call
+// it per client refresh, so cache the derived result briefly. Any write busts
+// the cache so the next read is fresh.
+let projectsCache: { at: number; data: { projects: Project[]; log: ActivityLogEntry[] } } | null = null;
+const PROJECTS_TTL_MS = 15000;
+function bustCache() { projectsCache = null; }
 
 export async function fetchProjects(): Promise<{ projects: Project[]; log: ActivityLogEntry[] }> {
   if (!isConfigured()) return { projects: [], log: [] };
+  if (projectsCache && Date.now() - projectsCache.at < PROJECTS_TTL_MS) return projectsCache.data;
   await ensureSchema();
 
   const [projectRows, tasks] = await Promise.all([queryAll(PROJECTS_DB()), fetchAllTasks()]);
-  const log = tasksToActivityLog(tasks);
+  const log = await buildActivityLog(tasks);
 
   const visible = projectRows.filter((page: any) => {
     const props = page.properties;
@@ -224,7 +302,6 @@ export async function fetchProjects(): Promise<{ projects: Project[]; log: Activ
 
   visible.sort((a: any, b: any) => (num(a.properties['Priority']) ?? 999) - (num(b.properties['Priority']) ?? 999));
 
-  const total = visible.length;
   const projects: Project[] = visible.map((page: any, i: number) => {
     const props = page.properties;
     const projectLog = log.filter(e => e.projectId === page.id);
@@ -235,7 +312,7 @@ export async function fetchProjects(): Promise<{ projects: Project[]; log: Activ
 
     const thresholdStr = text(props['Check-in threshold']) || '2 weeks';
     const thresholdDays = parseThresholdDays(thresholdStr);
-    const activity = computeActivity(lastMovedAt, projectLog);
+    const activity = computeActivity(projectLog);
     const quiet = computeQuiet(lastMovedAt, thresholdDays);
     const nextOverride = text(props['Next Step Override']);
     const next = pickNextStep(tasks, page.id);
@@ -254,8 +331,10 @@ export async function fetchProjects(): Promise<{ projects: Project[]; log: Activ
       nextNote: nextOverride ? 'Set manually' : (next?.note || ''),
       nextTarget: next?.target || '',
       priority: num(props['Priority']) ?? i + 1,
-      activity: quiet ? Math.min(activity, 0.1) : activity,
-      stature: computeStature(null, i + 1, total),
+      activity,
+      recentSessions: countRecentSessions(projectLog),
+      totalHours: computeTotalHours(projectLog),
+      stature: computeStature(computeTotalHours(projectLog)),
       trend: computeTrend(projectLog),
       quiet,
       week: computeWeek(log, page.id),
@@ -264,27 +343,209 @@ export async function fetchProjects(): Promise<{ projects: Project[]; log: Activ
     };
   });
 
-  return { projects, log };
+  const data = { projects, log };
+  projectsCache = { at: Date.now(), data };
+  return data;
 }
 
-export async function writeActivityLogEntry(entry: {
-  projectId: string; note: string; durationSec: number; source: 'live' | 'manual';
-  startedAt?: string; endedAt?: string;
-}) {
+// Keep the task's Duration (min) equal to the sum of its logged session lines,
+// so the property always reflects total time across sessions.
+async function recomputeDuration(taskId: string): Promise<void> {
+  const sessions = await readSessionBlocks(taskId);
+  const totalMin = Math.round(sessions.reduce((s, x) => s + x.durationSec, 0) / 60);
+  await client().pages.update({ page_id: taskId, properties: { 'Duration (min)': { number: totalMin } } });
+}
+
+// Create a task under a project. Used both for the task-list "add a task" and,
+// with a source, for the stub the app creates when you log time against a
+// project that has no open task yet — leaving Importance/Urgency for Katie.
+export async function createTask(fields: { projectId?: string | null; name: string; source?: 'live' | 'manual' }): Promise<string> {
   await ensureSchema();
-  const now = entry.endedAt || new Date().toISOString();
-  await client().pages.create({
-    parent: { database_id: TASKS_DB() },
-    properties: {
-      'Name': { title: [{ text: { content: entry.note.slice(0, 100) || (entry.source === 'manual' ? 'Logged after the fact' : 'Live activity') } }] },
-      'Project': { relation: [{ id: entry.projectId }] },
-      'Status': { status: { name: 'Done' } },
-      'Date Completed': { date: { start: now } },
-      'Status Notes': { rich_text: [{ text: { content: entry.note } }] },
-      'Duration (min)': { number: Math.round((entry.durationSec || 0) / 60) },
-      'Source': { select: { name: entry.source === 'manual' ? 'Manual' : 'Live' } },
-    },
+  const properties: Record<string, any> = {
+    'Name': { title: [{ text: { content: fields.name.slice(0, 100) || 'New task' } }] },
+    'Status': { status: { name: 'Not started' } },
+  };
+  if (fields.projectId) properties['Project'] = { relation: [{ id: fields.projectId }] };
+  if (fields.source) properties['Source'] = { select: { name: fields.source === 'manual' ? 'Manual' : 'Live' } };
+  const page = await client().pages.create({ parent: { database_id: TASKS_DB() }, properties });
+  bustCache();
+  return page.id;
+}
+
+// Mark a task done: Status → Done, Date Completed → now (Katie's completion
+// convention). No duration change — time already lives on its session lines.
+export async function completeTask(taskId: string): Promise<void> {
+  await client().pages.update({
+    page_id: taskId,
+    properties: { 'Status': { status: { name: 'Done' } }, 'Date Completed': { date: { start: new Date().toISOString() } } },
   });
+  bustCache();
+}
+
+// Log a work session. It attaches to a task: the caller's chosen task, else the
+// project's current top-priority open task, else a fresh stub. The session is
+// appended as a line in that task's page body and Duration (min) re-summed.
+export async function logSession(entry: {
+  taskId?: string | null; projectId?: string | null; note: string;
+  durationSec: number; source: 'live' | 'manual'; when?: string; newTask?: boolean;
+}): Promise<{ taskId: string }> {
+  await ensureSchema();
+  const when = entry.when || new Date().toISOString();
+
+  let target = entry.taskId || null;
+  if (!target && !entry.newTask && entry.projectId) {
+    const tasks = await fetchAllTasks();
+    target = topOpenTask(tasks, entry.projectId)?.id ?? null;
+  }
+  if (!target) {
+    target = await createTask({ projectId: entry.projectId, name: entry.note || 'New task', source: entry.source });
+  }
+
+  await client().blocks.children.append({
+    block_id: target,
+    children: [paragraph(formatSessionLine({ createdAt: when, durationSec: entry.durationSec, note: entry.note, source: entry.source }))],
+  });
+  await recomputeDuration(target);
+  bustCache();
+  return { taskId: target };
+}
+
+// Open tasks across the visible projects, for the per-project task list. The
+// top-priority open task per project is flagged as that project's next step.
+export async function fetchOpenTasks(): Promise<TaskLite[]> {
+  await ensureSchema();
+  const tasks = await fetchAllTasks();
+  const open = tasks.filter(t => t.projectId && !DONE_STATUSES.has(t.status));
+  const nextStepIds = new Set<string>();
+  for (const projectId of new Set(open.map(t => t.projectId as string))) {
+    const top = topOpenTask(tasks, projectId);
+    if (top) nextStepIds.add(top.id);
+  }
+  return open.map(t => ({
+    id: t.id, projectId: t.projectId, name: t.name, status: t.status,
+    priorityCalc: t.priorityCalc, isNextStep: nextStepIds.has(t.id),
+    importanceId: t.importanceId, urgencyId: t.urgencyId, statusNotes: t.statusNotes,
+  }));
+}
+
+// Write field values back to a task (Part A4). Select/status are set by option
+// id (safer against renames); an empty option list clears them; text writes the
+// rich_text field. Used to set Importance / Urgency / Status Notes from the
+// logger, on both new stubs and existing tasks.
+export async function updateTaskFields(taskId: string, updates: FieldUpdate[]): Promise<void> {
+  const properties: Record<string, any> = {};
+  for (const u of updates) {
+    if (u.type === 'select') {
+      properties[u.name] = { select: u.optionIds?.[0] ? { id: u.optionIds[0] } : null };
+    } else if (u.type === 'status') {
+      properties[u.name] = { status: u.optionIds?.[0] ? { id: u.optionIds[0] } : null };
+    } else if (u.type === 'multi_select') {
+      properties[u.name] = { multi_select: (u.optionIds || []).map(id => ({ id })) };
+    } else if (u.type === 'text') {
+      properties[u.name] = { rich_text: u.text ? [{ text: { content: u.text } }] : [] };
+    }
+  }
+  if (Object.keys(properties).length === 0) return;
+  await client().pages.update({ page_id: taskId, properties });
+  bustCache();
+}
+
+// The task DB's select / status / multi_select properties with their options
+// and Notion colors, read live from the data-source schema (Part A2). Cached for
+// the session — it rarely changes and each read is a round trip.
+let fieldSchemaCache: { at: number; fields: PickerField[] } | null = null;
+export async function fetchTaskFieldSchema(): Promise<PickerField[]> {
+  if (fieldSchemaCache && Date.now() - fieldSchemaCache.at < 5 * 60 * 1000) return fieldSchemaCache.fields;
+  const dsId = await resolveDataSourceId(TASKS_DB());
+  const ds = await client().dataSources.retrieve({ data_source_id: dsId });
+  const props = (ds as any).properties || {};
+  const fields: PickerField[] = [];
+  for (const [name, def] of Object.entries<any>(props)) {
+    const type = def?.type;
+    if (type === 'select' || type === 'status' || type === 'multi_select') {
+      const options: FieldOption[] = (def[type]?.options || []).map((o: any) => ({
+        id: o.id, name: o.name, color: o.color || 'default',
+      }));
+      fields.push({ name, type, options });
+    }
+  }
+  fieldSchemaCache = { at: Date.now(), fields };
+  return fields;
+}
+
+// Read-only weekly reflection derived entirely from the activity log.
+export async function fetchWeeklyReview(): Promise<WeeklyReview> {
+  const { projects, log } = await fetchProjects();
+  return computeWeeklyReview(log, projects.map(p => ({ id: p.id, name: p.name, quiet: p.quiet })));
+}
+
+// Edit a logged entry. Session entries have a composite `taskId:blockId` id —
+// rewrite the body line and re-sum the task's duration. Legacy standalone rows
+// (plain page id) still edit their Status Notes / Duration in place.
+export async function updateActivityEntry(entryId: string, fields: { note?: string; durationSec?: number }) {
+  if (entryId.includes(':')) {
+    const [taskId, blockId] = entryId.split(':');
+    const block: any = await client().blocks.retrieve({ block_id: blockId });
+    const existing = parseSessionLine(blockText(block))
+      || { createdAt: new Date().toISOString(), durationSec: 0, note: '', source: 'live' as const };
+    const updated = {
+      createdAt: existing.createdAt,
+      durationSec: fields.durationSec != null ? fields.durationSec : existing.durationSec,
+      note: fields.note != null ? fields.note : existing.note,
+      source: existing.source,
+    };
+    const blockType: string = block.type;
+    await client().blocks.update({
+      block_id: blockId,
+      [blockType]: { rich_text: [{ type: 'text', text: { content: formatSessionLine(updated) } }] },
+    } as any);
+    await recomputeDuration(taskId);
+    bustCache();
+    return;
+  }
+
+  const properties: Record<string, any> = {};
+  if (fields.note != null) {
+    properties['Status Notes'] = { rich_text: [{ text: { content: fields.note } }] };
+    properties['Name'] = { title: [{ text: { content: fields.note.slice(0, 100) || 'Logged activity' } }] };
+  }
+  if (fields.durationSec != null) {
+    properties['Duration (min)'] = { number: Math.round(fields.durationSec / 60) };
+  }
+  if (Object.keys(properties).length === 0) return;
+  await client().pages.update({ page_id: entryId, properties });
+  bustCache();
+}
+
+// Optional Claude-written copy for the skyline header and the gentle nudge.
+// Reads a Notion page (NOTION_NARRATIVE_PAGE) whose lines use the convention
+//   Skyline: <one-sentence header under the skyline>
+//   Nudge: <the gentle-nudge body>
+// so a scheduled Claude task can rewrite the page and the app picks it up.
+let narrativeCache: { at: number; value: { skyline: string | null; nudge: string | null } } | null = null;
+export async function fetchNarrative(): Promise<{ skyline: string | null; nudge: string | null }> {
+  const pageId = env('NOTION_NARRATIVE_PAGE');
+  if (!pageId || !env('NOTION_TOKEN')) return { skyline: null, nudge: null };
+  if (narrativeCache && Date.now() - narrativeCache.at < 5 * 60 * 1000) return narrativeCache.value;
+  const value: { skyline: string | null; nudge: string | null } = { skyline: null, nudge: null };
+  try {
+    let cursor: string | undefined;
+    do {
+      const res: any = await client().blocks.children.list({ block_id: pageId, start_cursor: cursor, page_size: 100 });
+      for (const block of res.results as any[]) {
+        const rt = block[block.type]?.rich_text;
+        if (!rt) continue;
+        const line = rt.map((t: any) => t.plain_text).join('').trim();
+        const m = /^(skyline|nudge)\s*:\s*(.+)$/i.exec(line);
+        if (m) value[m[1].toLowerCase() as 'skyline' | 'nudge'] = m[2].trim();
+      }
+      cursor = res.has_more ? (res.next_cursor ?? undefined) : undefined;
+    } while (cursor);
+  } catch {
+    // Page missing or not shared — fall back to app-generated copy.
+  }
+  narrativeCache = { at: Date.now(), value };
+  return value;
 }
 
 export async function writeReorderEvent(projectId: string, newPriority: number, reason: string | null) {
@@ -292,6 +553,7 @@ export async function writeReorderEvent(projectId: string, newPriority: number, 
   const properties: Record<string, any> = { 'Priority': { number: newPriority } };
   if (reason) properties['Last Reorder Reason'] = { rich_text: [{ text: { content: reason } }] };
   await client().pages.update({ page_id: projectId, properties });
+  bustCache();
 }
 
 export async function updateProjectFields(projectId: string, fields: Partial<{
@@ -304,10 +566,12 @@ export async function updateProjectFields(projectId: string, fields: Partial<{
   if (fields.nextStep != null) properties['Next Step Override'] = { rich_text: [{ text: { content: fields.nextStep } }] };
   if (fields.status != null) properties['Status'] = { select: { name: fields.status } };
   await client().pages.update({ page_id: projectId, properties });
+  bustCache();
 }
 
 export async function archiveProject(projectId: string) {
   await client().pages.update({ page_id: projectId, properties: { 'Status': { select: { name: 'Archive' } } } });
+  bustCache();
 }
 
 export async function createProject(fields: { name: string; priority: number }) {
@@ -324,5 +588,6 @@ export async function createProject(fields: { name: string; priority: number }) 
       'Check-in threshold': { rich_text: [{ text: { content: '2 weeks' } }] },
     },
   });
+  bustCache();
   return page.id;
 }

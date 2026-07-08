@@ -7,21 +7,23 @@ interface SkylineProps {
   projects: Project[];
   calendarEvents?: CalendarEvent[];
   onRequestReorder?: () => void;
+  truthOverride?: string | null;
 }
 
 interface Building {
   id: string; name: string; rank: number; lastMoved: string;
-  sessions: string; threshold: string; note: string;
-  h: number; w: number; activity: number; trend: Trend;
+  sessions: string; threshold: string; note: string; totalHours: number;
+  h: number; w: number; activity: number; recentSessions: number; trend: Trend;
   halo: boolean; quiet: boolean; showCheckin: boolean; checkinText: string;
   showPin: boolean; pinLabel: string; showTrend: boolean;
   recoveryNote: string | null;
 }
 
-function Grid({ activity, h, flavor }: { activity: number; h: number; flavor: Flavor }) {
+// One lit window per session worked in the past month; dark if none.
+function Grid({ sessions, h, flavor }: { sessions: number; h: number; flavor: Flavor }) {
   const rows = Math.max(3, Math.round((h - 44) / 36));
   const total = rows * 3;
-  const lit = activity <= 0 ? 0 : Math.max(1, Math.round(total * activity));
+  const lit = Math.min(total, Math.max(0, sessions));
   const cells = [];
   for (let i = 0; i < total; i++) {
     const on = i >= total - lit;
@@ -81,7 +83,7 @@ function matchPin(name: string, events: CalendarEvent[]): { label: string } | nu
 
 const cssVars = (vars: Record<string, string>) => vars as CSSProperties;
 
-export default function Skyline({ projects, calendarEvents = [], onRequestReorder }: SkylineProps) {
+export default function Skyline({ projects, calendarEvents = [], onRequestReorder, truthOverride }: SkylineProps) {
   const [forecastOn, setForecastOn] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checkin, setCheckin] = useState<string | null>(null);
@@ -107,13 +109,17 @@ export default function Skyline({ projects, calendarEvents = [], onRequestReorde
   };
 
   const buildings: Building[] = useMemo(() => projects.map((p, i) => {
-    const h = Math.round(134 + p.stature * 178);
+    // Height reflects time invested (stature = log of total hours), and the
+    // building grows further if a month's sessions need more windows than fit.
+    const hFromTime = Math.round(134 + p.stature * 178);
+    const hForSessions = 44 + Math.ceil(Math.max(1, p.recentSessions) / 3) * 36 + 16;
+    const h = Math.min(352, Math.max(hFromTime, hForSessions));
     const w = Math.round(78 + p.stature * 22);
     const pin = forecastOn ? matchPin(p.name, calendarEvents) : null;
     return {
       id: p.id, name: p.name, rank: i + 1, lastMoved: p.lastMoved,
-      sessions: p.sessions, threshold: p.threshold, note: p.note,
-      h, w, activity: p.activity, trend: p.trend,
+      sessions: p.sessions, threshold: p.threshold, note: p.note, totalHours: p.totalHours,
+      h, w, activity: p.activity, recentSessions: p.recentSessions, trend: p.trend,
       halo: forecastOn && p.activity > 0.85,
       quiet: p.quiet, showCheckin: p.quiet,
       checkinText: i === 0 ? 'This hasn’t moved in a while — still your #1?' : 'This has been quiet — still a priority?',
@@ -198,7 +204,7 @@ export default function Skyline({ projects, calendarEvents = [], onRequestReorde
 
         <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 4, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: '26px', padding: '0 34px 26px' }}>
           {buildings.map(b => (
-            <div key={b.id} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', width: b.w + 'px' }}>
+            <div key={b.id} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', width: Math.max(b.w, 112) + 'px' }}>
               {b.showPin && (
                 <div style={{ position: 'absolute', top: '-46px', zIndex: 7, display: 'flex', flexDirection: 'column', alignItems: 'center', animation: 'sk-rise .5s ease both' }}>
                   <div style={{ background: 'var(--pin)', color: 'var(--pin-ink)', fontSize: '10.5px', fontWeight: 700, letterSpacing: '.02em', padding: '5px 9px', borderRadius: '8px', whiteSpace: 'nowrap', boxShadow: '0 6px 16px rgba(0,0,0,.28)' }}>{b.pinLabel}</div>
@@ -211,12 +217,12 @@ export default function Skyline({ projects, calendarEvents = [], onRequestReorde
                   <Plume trend={b.trend} />
                 </div>
               )}
-              <div onClick={() => { setSelectedId(b.id); setCheckin(null); }} style={{ position: 'relative', zIndex: 5, width: '100%', height: b.h + 'px', cursor: 'pointer', borderRadius: '5px 5px 0 0', background: 'linear-gradient(180deg,var(--building-top),var(--building))', boxShadow: 'inset 0 0 0 1px var(--stroke), 0 -2px 30px rgba(0,0,0,.14)', overflow: 'hidden', transition: 'transform .25s ease' }}>
+              <div onClick={() => { setSelectedId(b.id); setCheckin(null); }} style={{ position: 'relative', zIndex: 5, width: b.w + 'px', height: b.h + 'px', cursor: 'pointer', borderRadius: '5px 5px 0 0', background: 'linear-gradient(180deg,var(--building-top),var(--building))', boxShadow: 'inset 0 0 0 1px var(--stroke), 0 -2px 30px rgba(0,0,0,.14)', overflow: 'hidden', transition: 'transform .25s ease, height .5s ease' }}>
                 {b.halo && <div style={{ position: 'absolute', inset: '-40% -30%', background: 'radial-gradient(50% 55% at 50% 60%, var(--glow), transparent 70%)', animation: 'sk-glow 4.5s ease-in-out infinite', pointerEvents: 'none' }} />}
-                <div style={{ position: 'relative', height: '100%' }}><Grid activity={b.activity} h={b.h} flavor={flavor} /></div>
+                <div style={{ position: 'relative', height: '100%' }}><Grid sessions={b.recentSessions} h={b.h} flavor={flavor} /></div>
                 {b.id === selectedId && <div style={{ position: 'absolute', inset: 0, borderRadius: '5px 5px 0 0', boxShadow: 'inset 0 0 0 2px var(--accent)', pointerEvents: 'none' }} />}
               </div>
-              <div style={{ marginTop: '18px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', width: '126px' }}>
+              <div style={{ marginTop: '18px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', width: '100%', padding: '0 4px', boxSizing: 'border-box', textAlign: 'center' }}>
                 <div style={{ width: '20px', height: '20px', borderRadius: '50%', background: 'var(--card)', border: '1px solid var(--stroke)', color: 'var(--ink)', fontSize: '10.5px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }}>{b.rank}</div>
                 <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--ink)', lineHeight: 1.25, textWrap: 'balance' as CSSProperties['textWrap'] }}>{b.name}</div>
                 <div style={{ fontSize: '11px', color: 'var(--ink-soft)' }}>{b.lastMoved}</div>
@@ -246,6 +252,7 @@ export default function Skyline({ projects, calendarEvents = [], onRequestReorde
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}><span style={{ color: 'var(--ink-soft)' }}>Stated priority</span><span style={{ color: 'var(--ink)', fontWeight: 600 }}>#{sel.rank}</span></div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}><span style={{ color: 'var(--ink-soft)' }}>Last activity</span><span style={{ color: 'var(--ink)', fontWeight: 600 }}>{sel.lastMoved}</span></div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}><span style={{ color: 'var(--ink-soft)' }}>Sessions logged</span><span style={{ color: 'var(--ink)', fontWeight: 600 }}>{sel.sessions}</span></div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}><span style={{ color: 'var(--ink-soft)' }}>Time logged (all time)</span><span style={{ color: 'var(--ink)', fontWeight: 600 }}>{sel.totalHours}h</span></div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}><span style={{ color: 'var(--ink-soft)' }}>Check-in threshold</span><span style={{ color: 'var(--ink)', fontWeight: 600 }}>{sel.threshold}</span></div>
             </div>
             <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '13.5px', lineHeight: 1.45, color: 'var(--ink)', opacity: .86, marginTop: '13px', paddingTop: '12px', borderTop: '1px solid var(--stroke)' }}>{sel.note}</div>
@@ -271,11 +278,14 @@ export default function Skyline({ projects, calendarEvents = [], onRequestReorde
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px', justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <div style={{ maxWidth: '600px' }}>
             <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontStyle: 'italic', fontSize: '21px', lineHeight: 1.34, color: 'var(--ink)', textWrap: 'pretty' as CSSProperties['textWrap'] }}>
-              {truth.pre}<span style={{ fontStyle: 'normal', fontWeight: 600 }}>{truth.aName}</span>{truth.mid}<span style={{ fontStyle: 'normal', fontWeight: 600 }}>{truth.bName}</span>{truth.post}
+              {truthOverride
+                ? truthOverride
+                : <>{truth.pre}<span style={{ fontStyle: 'normal', fontWeight: 600 }}>{truth.aName}</span>{truth.mid}<span style={{ fontStyle: 'normal', fontWeight: 600 }}>{truth.bName}</span>{truth.post}</>}
             </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '10.5px', color: 'var(--ink-soft)', whiteSpace: 'nowrap' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}><span style={{ width: '9px', height: '9px', borderRadius: '2px', background: 'var(--win-on)', boxShadow: '0 0 6px var(--glow)' }} />lit = recent activity</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}><span style={{ width: '9px', height: '9px', borderRadius: '2px', background: 'var(--win-on)', boxShadow: '0 0 6px var(--glow)' }} />lit = one window per session this month</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}><span style={{ color: 'var(--ink)', fontWeight: 700 }}>▲</span>height = time invested</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}><span style={{ color: 'var(--ink)', fontWeight: 700 }}>←</span>left = higher stated priority</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}><span style={{ width: '9px', height: '9px', borderRadius: '50%', background: 'var(--fog)' }} />fog = forecast trend</div>
           </div>

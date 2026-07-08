@@ -16,6 +16,8 @@ export interface Project {
   nextTarget: string;
   priority: number;
   activity: number;
+  recentSessions: number;
+  totalHours: number;
   stature: number;
   trend: Trend;
   quiet: boolean;
@@ -34,9 +36,69 @@ export interface CalendarEvent {
   startISO: string;
 }
 
+export interface TaskLite {
+  id: string;
+  projectId: string | null;
+  name: string;
+  status: string;
+  priorityCalc: number | null;
+  isNextStep: boolean;
+  importanceId: string | null;
+  urgencyId: string | null;
+  statusNotes: string;
+}
+
+export interface FieldUpdate {
+  name: string;
+  type: 'select' | 'status' | 'multi_select' | 'text';
+  optionIds?: string[];
+  text?: string;
+}
+
+export interface FieldOption {
+  id: string;
+  name: string;
+  color: string;
+}
+
+export interface PickerField {
+  name: string;
+  type: 'select' | 'status' | 'multi_select';
+  options: FieldOption[];
+}
+
+export interface WeeklyReviewProject {
+  projectId: string;
+  name: string;
+  hoursThisWeek: number;
+  hoursLastWeek: number;
+  delta: number;
+  trend: Trend;
+}
+
+export interface WeeklyReview {
+  totalHoursThisWeek: number;
+  totalHoursLastWeek: number;
+  sessionsThisWeek: number;
+  activeProjectsThisWeek: number;
+  longestStreakDays: number;
+  busiestDay: { label: string; hours: number } | null;
+  byProject: WeeklyReviewProject[];
+  rising: string[];
+  fading: string[];
+  wentDark: string[];
+}
+
 export interface FeedEntry {
+  id: string;
   project: string;
   note: string;
   when: string;
   dur: string;
+  durationSec: number;
+}
+
+export interface Narrative {
+  skyline: string | null;
+  nudge: string | null;
 }

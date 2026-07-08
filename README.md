@@ -52,17 +52,43 @@ for the template):
    Next Step Override, Last Reorder Reason on projects; Duration (min) and
    Source on tasks). Existing rows are untouched.
 
+## Claude-written copy (optional)
+
+The skyline's one-line header and the "gentle nudge" can be written by a
+scheduled Claude task instead of the app's built-in templates. Create a
+Notion page containing two lines:
+
+```
+Skyline: <one sentence for under the skyline>
+Nudge: <the gentle nudge body>
+```
+
+Share the page with the KatieOS integration, put its ID in
+`NOTION_NARRATIVE_PAGE` in `server/.env`, and the dashboard will prefer that
+copy whenever those lines exist (refreshed every few minutes). A recurring
+Claude task can then rewrite the page on a schedule using your recent
+Notion activity — no code edits involved.
+
 ## How it behaves
 
 - Projects with Status `Active`, `On Hold`, or empty are shown; rows whose
   "Work or Personal?" formula contains "work" are filtered out.
 - Tasks count as done when Status is `Done` or `Irrelevant`. The next open
-  task (earliest due date, then oldest) becomes each project's "next step".
-- Completed tasks with a Date Completed become the activity log that lights
-  the skyline windows.
-- Timer stops and manual logs write back to the Master Task List as `Done`
-  rows tagged `Live`/`Manual`; drag-reorders write `Priority` (and an
-  optional reason) back to the project pages.
+  task with the highest `Priority Calculation` — the same key the Master Task
+  List's Priority View sorts by — becomes each project's "next step".
+- Each project card lists its open tasks: check one off to set Status `Done`
+  and Date Completed in Notion, or add a task inline (it lands under the
+  project for you to set Importance/Urgency).
+- Logging a session (live timer or after-the-fact) attaches to a task — by
+  default the project's next step, or one you pick, or a fresh stub. The
+  session is appended as a dated line in that task's Notion page (a running
+  work journal) and the task's `Duration (min)` is kept as the sum across
+  sessions. Those session lines light the skyline windows; a completed task
+  contributes its total on its completion date.
+- "Your week in the city" is a read-only weekly reflection (hours by project,
+  what rose or faded, what went quiet, streak) derived from that same log.
+- Drag-reorders write `Priority` (and an optional reason) back to the project
+  pages.
 
 ## Useful commands
 
