@@ -556,7 +556,7 @@ export default function Dashboard() {
                         <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: '#f3ead9', color: '#a06a2e', fontSize: '12px', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }}>{i + 1}</div>
                         <div style={{ minWidth: 0, flex: 1 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span style={{ fontSize: '15px', fontWeight: 800, color: INK }}>{p.name}</span>
+                            <span style={{ fontSize: '15px', fontWeight: 600, color: INK }}>{p.name}</span>
                             <span style={{ fontSize: '10px', fontWeight: 800, letterSpacing: '.05em', textTransform: 'uppercase', color: tc.fg, background: tc.bg, border: `2px solid ${tc.bd}`, borderRadius: '20px', padding: '2px 9px' }}>{word}</span>
                           </div>
                           <div style={{ fontSize: '11.5px', color: '#a8927a', marginTop: '2px', fontWeight: 600 }}>last visited {p.lastMoved}</div>
@@ -691,7 +691,7 @@ export default function Dashboard() {
                 <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#9b7fc7' }} />
                 <span style={{ fontSize: '10.5px', letterSpacing: '.1em', textTransform: 'uppercase', fontWeight: 800, color: '#7d6a9e' }}>A note from the neighborhood</span>
               </div>
-              <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 600, fontSize: '15.5px', lineHeight: 1.45, color: '#584a72', marginTop: '9px' }}>{nudge.body}</div>
+              <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 400, fontSize: '15.5px', lineHeight: 1.45, color: '#584a72', marginTop: '9px' }}>{nudge.body}</div>
             </div>
           </div>
         </div>
