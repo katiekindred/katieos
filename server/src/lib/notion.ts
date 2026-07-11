@@ -73,6 +73,7 @@ export async function ensureSchema(): Promise<void> {
   if (!projectProps['Priority']) missingProjectProps['Priority'] = { number: { format: 'number' } };
   if (!projectProps['Next Step Override']) missingProjectProps['Next Step Override'] = { rich_text: {} };
   if (!projectProps['Last Reorder Reason']) missingProjectProps['Last Reorder Reason'] = { rich_text: {} };
+  if (!projectProps['House Color']) missingProjectProps['House Color'] = { rich_text: {} };
   if (Object.keys(missingProjectProps).length) {
     await client().dataSources.update({ data_source_id: projectsDsId, properties: missingProjectProps });
   }
@@ -340,6 +341,7 @@ export async function fetchProjects(): Promise<{ projects: Project[]; log: Activ
       week: computeWeek(log, page.id),
       hours: computeHoursThisWeek(log, page.id),
       recoveryNote: findRecovery(log, page.id, thresholdDays)?.note ?? null,
+      houseColor: text(props['House Color']) || null,
     };
   });
 
@@ -517,18 +519,16 @@ export async function updateActivityEntry(entryId: string, fields: { note?: stri
   bustCache();
 }
 
-// Optional Claude-written copy for the skyline header and the gentle nudge.
-// Reads a Notion page (NOTION_NARRATIVE_PAGE) whose lines use the convention
-//   Skyline: <one-sentence header under the skyline>
-//   Nudge: <the gentle-nudge body>
-// so a scheduled Claude task can rewrite the page and the app picks it up.
-let narrativeCache: { at: number; value: { skyline: string | null; nudge: string | null } } | null = null;
-export async function fetchNarrative(): Promise<{ skyline: string | null; nudge: string | null }> {
-  const pageId = env('NOTION_NARRATIVE_PAGE');
-  if (!pageId || !env('NOTION_TOKEN')) return { skyline: null, nudge: null };
-  if (narrativeCache && Date.now() - narrativeCache.at < 5 * 60 * 1000) return narrativeCache.value;
-  const value: { skyline: string | null; nudge: string | null } = { skyline: null, nudge: null };
+// Optional Claude-written copy for the skyline header and the gentle nudge,
+// each read verbatim from its own Notion page: NOTION_SKYLINE_PAGE for the
+// skyline subheading, NOTION_NUDGE_PAGE for the nudge body. A scheduled Claude
+// task rewrites either page's content and the app picks it up. Lines whose
+// trimmed text starts with `<!--` are treated as guidance comments and
+// skipped; the rest are joined with newlines and trimmed.
+async function fetchPageText(pageId: string | undefined): Promise<string | null> {
+  if (!pageId || !env('NOTION_TOKEN')) return null;
   try {
+    const lines: string[] = [];
     let cursor: string | undefined;
     do {
       const res: any = await client().blocks.children.list({ block_id: pageId, start_cursor: cursor, page_size: 100 });
@@ -536,14 +536,27 @@ export async function fetchNarrative(): Promise<{ skyline: string | null; nudge:
         const rt = block[block.type]?.rich_text;
         if (!rt) continue;
         const line = rt.map((t: any) => t.plain_text).join('').trim();
-        const m = /^(skyline|nudge)\s*:\s*(.+)$/i.exec(line);
-        if (m) value[m[1].toLowerCase() as 'skyline' | 'nudge'] = m[2].trim();
+        if (line.startsWith('<!--')) continue;
+        lines.push(line);
       }
       cursor = res.has_more ? (res.next_cursor ?? undefined) : undefined;
     } while (cursor);
+    const joined = lines.join('\n').trim();
+    return joined || null;
   } catch {
     // Page missing or not shared — fall back to app-generated copy.
+    return null;
   }
+}
+
+let narrativeCache: { at: number; value: { skyline: string | null; nudge: string | null } } | null = null;
+export async function fetchNarrative(): Promise<{ skyline: string | null; nudge: string | null }> {
+  if (narrativeCache && Date.now() - narrativeCache.at < 5 * 60 * 1000) return narrativeCache.value;
+  const [skyline, nudge] = await Promise.all([
+    fetchPageText(env('NOTION_SKYLINE_PAGE')),
+    fetchPageText(env('NOTION_NUDGE_PAGE')),
+  ]);
+  const value = { skyline, nudge };
   narrativeCache = { at: Date.now(), value };
   return value;
 }
@@ -557,7 +570,7 @@ export async function writeReorderEvent(projectId: string, newPriority: number, 
 }
 
 export async function updateProjectFields(projectId: string, fields: Partial<{
-  name: string; blurb: string; nextStep: string; status: string;
+  name: string; blurb: string; nextStep: string; status: string; houseColor: string | null;
 }>) {
   await ensureSchema();
   const properties: Record<string, any> = {};
@@ -565,6 +578,9 @@ export async function updateProjectFields(projectId: string, fields: Partial<{
   if (fields.blurb != null) properties['Description'] = { rich_text: [{ text: { content: fields.blurb } }] };
   if (fields.nextStep != null) properties['Next Step Override'] = { rich_text: [{ text: { content: fields.nextStep } }] };
   if (fields.status != null) properties['Status'] = { select: { name: fields.status } };
+  if (fields.houseColor !== undefined) {
+    properties['House Color'] = { rich_text: fields.houseColor ? [{ text: { content: fields.houseColor } }] : [] };
+  }
   await client().pages.update({ page_id: projectId, properties });
   bustCache();
 }

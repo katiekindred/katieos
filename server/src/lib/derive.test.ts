@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ActivityLogEntry } from '../types.js';
 import {
-  computeStature, computeWeeklyReview, formatSessionLine, parseSessionLine,
+  computeStature, computeSummary, computeWeeklyReview, formatSessionLine, parseSessionLine,
   parseThresholdDays,
 } from './derive.js';
 
@@ -73,4 +73,19 @@ test('computeWeeklyReview aggregates this week vs last, rising/fading/wentDark',
   assert.equal(r.longestStreakDays, 1); // a session today, none yesterday
   assert.ok(r.busiestDay);
   assert.equal(r.busiestDay!.hours, 1); // the 60m session two days ago
+});
+
+test('computeSummary derives streak/hours/visits from the activity log', () => {
+  const now = Date.parse('2026-07-07T12:00:00Z');
+  const DAY = 24 * 60 * 60 * 1000;
+  const mk = (daysAgo: number, mins: number): ActivityLogEntry => ({
+    id: `e-${daysAgo}`, projectId: 'p1', startedAt: null, endedAt: null,
+    durationSec: mins * 60, note: 'x', source: 'live',
+    createdAt: new Date(now - daysAgo * DAY).toISOString(),
+  });
+  const log = [mk(0, 30), mk(1, 30), mk(2, 60), mk(20, 45)];
+  const s = computeSummary(log, now);
+  assert.equal(s.streakDays, 3); // today, yesterday, two days ago — unbroken
+  assert.equal(s.hoursThisWeek, 2); // 30+30+60 min within the last 7 days
+  assert.equal(s.visitsThisMonth, 4); // all four entries fall within 30 days
 });

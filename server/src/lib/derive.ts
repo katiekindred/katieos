@@ -196,6 +196,31 @@ function hoursIn(entries: ActivityLogEntry[], from: number, to: number): number 
   return Math.round((secs / 3600) * 10) / 10;
 }
 
+export interface Summary { streakDays: number; hoursThisWeek: number; visitsThisMonth: number }
+
+// Stickers-row stats: the longest run of consecutive days (ending today) with
+// any logged session, total hours in the last 7 days, and how many sessions
+// were logged in the last 30 days — across every project.
+export function computeSummary(log: ActivityLogEntry[], now: number = Date.now()): Summary {
+  const thisFrom = now - 7 * DAY_MS;
+  const end = now + 1;
+  const hoursThisWeek = hoursIn(log, thisFrom, end);
+
+  const touchedDays = new Set<string>();
+  for (const e of log) touchedDays.add(new Date(e.createdAt).toISOString().slice(0, 10));
+  let streakDays = 0;
+  for (let i = 0; i < 60; i++) {
+    const key = new Date(now - i * DAY_MS).toISOString().slice(0, 10);
+    if (touchedDays.has(key)) streakDays++;
+    else break;
+  }
+
+  const monthFrom = now - 30 * DAY_MS;
+  const visitsThisMonth = log.filter(e => new Date(e.createdAt).getTime() >= monthFrom && new Date(e.createdAt).getTime() < end).length;
+
+  return { streakDays, hoursThisWeek, visitsThisMonth };
+}
+
 export function computeWeeklyReview(
   log: ActivityLogEntry[],
   projects: ReviewProjectInput[],

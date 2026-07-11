@@ -23,6 +23,7 @@ export interface Project {
   week: boolean[];
   hours: number;
   recoveryNote: string | null;
+  houseColor: string | null;
 }
 
 export interface ActivityLogEntry {

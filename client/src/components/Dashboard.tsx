@@ -1,13 +1,22 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { api } from '../api';
-import type { CalendarEvent, FeedEntry, FieldUpdate, Narrative, PickerField, Project, TaskLite, WeeklyReview } from '../types';
+import type { CalendarEvent, FeedEntry, FieldUpdate, Narrative, PickerField, Project, Summary, TaskLite, WeeklyReview } from '../types';
+import Confetti from './Confetti';
+import { HOUSE_COLORS, colorsFor } from './houseColors';
 import NotionFieldDropdown from './NotionFieldDropdown';
 import Skyline from './Skyline';
+import { TREND_COLORS, trendWord } from './village';
 
-const ACCENT = '#2f6bb0';
-const ACCENT_SOFT = '#eaf1fa';
+const ACCENT = '#c96f4e';
+const ACCENT_DARK = '#a5532f';
+const ACCENT_SOFT = '#f3ead9';
+const INK = '#4a3a2e';
+const INK_SOFT = '#8d7a66';
 const USER_NAME = 'Katie';
 const LIVE_SESSION_KEY = 'katieos-live-session';
+
+const DISPLAY_FONT = "'Fraunces', Georgia, serif";
+const BODY_FONT = "'Nunito', system-ui, sans-serif";
 
 type CapMode = 'idle' | 'picking' | 'running' | 'noting';
 
@@ -35,24 +44,31 @@ function fmtDur(sec: number): string {
   return m % 60 === 0 ? `${m / 60}h` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+const HEX_RE = /^#?[0-9a-fA-F]{6}$/;
+
 const input: CSSProperties = {
-  width: '100%', fontFamily: 'inherit', fontSize: '12.5px', color: '#16233a',
-  padding: '9px 11px', border: '1px solid #dbe3ee', borderRadius: '9px', outline: 'none', background: '#fff',
+  width: '100%', fontFamily: 'inherit', fontSize: '12.5px', color: INK,
+  padding: '9px 12px', border: '2px solid #ecdcc5', borderRadius: '12px', outline: 'none', background: '#fff',
 };
 
 const taskChip = (selected: boolean): CSSProperties => ({
-  cursor: 'pointer', fontSize: '11.5px', fontWeight: 600, padding: '6px 10px', borderRadius: '8px',
+  cursor: 'pointer', fontSize: '11.5px', fontWeight: 800, padding: '6px 10px', borderRadius: '10px',
   maxWidth: '190px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-  background: selected ? 'var(--ac)' : '#fff', color: selected ? '#fff' : '#16233a',
-  border: selected ? '1px solid var(--ac)' : '1px solid #dbe3ee', transition: 'all .15s',
+  background: selected ? 'var(--ac)' : '#fff', color: selected ? '#fff' : INK,
+  border: selected ? '2px solid var(--ac)' : '2px solid #ecdcc5', transition: 'all .15s',
 });
+
+const stickerCard: CSSProperties = {
+  background: '#fffdf8', border: '2px solid #f0e2cf', borderRadius: '24px',
+  padding: '24px 24px 20px', boxShadow: '0 5px 0 #f0e2cf',
+};
 
 // The Notion fields the logger can set on a task: Importance + Urgency (colored
 // option pickers) and Status Notes (free text). Populated from the task when it
 // exists, blank for a new stub.
 interface Fields { importance: string | null; urgency: string | null; statusNotes: string }
 const BLANK_FIELDS: Fields = { importance: null, urgency: null, statusNotes: '' };
-const fieldLabel: CSSProperties = { fontSize: '11px', color: '#5a6b84', marginBottom: '5px' };
+const fieldLabel: CSSProperties = { fontSize: '11px', color: INK_SOFT, marginBottom: '5px', fontWeight: 700 };
 
 // Module-scope so the Status Notes text input keeps focus across keystrokes.
 function TaskFieldEditors({ schema, fields, onChange }: { schema: PickerField[]; fields: Fields; onChange: (f: Fields) => void }) {
@@ -90,6 +106,8 @@ function fieldUpdates(draft: Fields, orig: Fields): FieldUpdate[] {
   return u;
 }
 
+interface ProjectDraft { name: string; blurb: string; threshold: string; nextStep: string; houseColor: string | null; colorHexInput: string }
+
 export default function Dashboard() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [calendar, setCalendar] = useState<CalendarEvent[]>([]);
@@ -98,11 +116,12 @@ export default function Dashboard() {
   const [feed, setFeed] = useState<FeedEntry[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [summary, setSummary] = useState<Summary | null>(null);
 
   const [dragId, setDragId] = useState<string | null>(null);
   const [reorderMsg, setReorderMsg] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<{ name: string; blurb: string; threshold: string; nextStep: string } | null>(null);
+  const [draft, setDraft] = useState<ProjectDraft | null>(null);
 
   const [capMode, setCapMode] = useState<CapMode>('idle');
   const [capProject, setCapProject] = useState<string | null>(null);
@@ -119,6 +138,7 @@ export default function Dashboard() {
   const [feedDraft, setFeedDraft] = useState<{ dur: string; note: string }>({ dur: '', note: '' });
   const [saveError, setSaveError] = useState<string | null>(null);
   const [narrative, setNarrative] = useState<Narrative | null>(null);
+  const [confettiBurst, setConfettiBurst] = useState(0);
 
   // Open tasks per project, plus which project's task list is expanded and the
   // task a session should attach to (null = the project's next step; 'NEW' = a
@@ -138,6 +158,10 @@ export default function Dashboard() {
   const [capOrig, setCapOrig] = useState<Fields>(BLANK_FIELDS);
   const [manFields, setManFields] = useState<Fields>(BLANK_FIELDS);
   const [manOrig, setManOrig] = useState<Fields>(BLANK_FIELDS);
+
+  function celebrate() {
+    setConfettiBurst(Date.now());
+  }
 
   const tasksFor = (projectId: string | null) =>
     tasks.filter(t => t.projectId === projectId)
@@ -202,13 +226,17 @@ export default function Dashboard() {
     try { setReview(await api.weeklyReview()); } catch { /* non-fatal */ }
   }, []);
 
+  const loadSummary = useCallback(async () => {
+    try { setSummary(await api.summary()); } catch { /* non-fatal */ }
+  }, []);
+
   const loadSchema = useCallback(async () => {
     try { setSchema(await api.taskSchema()); } catch { /* non-fatal */ }
   }, []);
 
   useEffect(() => {
-    loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview(); loadSchema();
-    const t = setInterval(() => { loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview(); }, 60000);
+    loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview(); loadSchema(); loadSummary();
+    const t = setInterval(() => { loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview(); loadSummary(); }, 60000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -264,14 +292,15 @@ export default function Dashboard() {
   // ----- edit / add / remove -----
   function startEdit(p: Project) {
     setEditingId(p.id);
-    setDraft({ name: p.name, blurb: p.blurb, threshold: p.threshold, nextStep: p.nextStep });
+    const hex = p.houseColor && HEX_RE.test(p.houseColor) ? (p.houseColor.startsWith('#') ? p.houseColor : `#${p.houseColor}`) : '';
+    setDraft({ name: p.name, blurb: p.blurb, threshold: p.threshold, nextStep: p.nextStep, houseColor: p.houseColor ?? null, colorHexInput: hex });
   }
   async function saveEdit(id: string) {
     if (!draft) return;
     setEditingId(null);
-    setProjects(ps => ps.map(p => p.id === id ? { ...p, name: draft.name, blurb: draft.blurb, threshold: draft.threshold, nextStep: draft.nextStep } : p));
+    setProjects(ps => ps.map(p => p.id === id ? { ...p, name: draft.name, blurb: draft.blurb, nextStep: draft.nextStep, houseColor: draft.houseColor } : p));
     try {
-      await api.updateProject(id, { name: draft.name, blurb: draft.blurb, nextStep: draft.nextStep });
+      await api.updateProject(id, { name: draft.name, blurb: draft.blurb, nextStep: draft.nextStep, houseColor: draft.houseColor });
       setSaveError(null);
     } catch (e: any) {
       setSaveError(`Couldn't save project changes to Notion: ${e.message}`);
@@ -287,9 +316,9 @@ export default function Dashboard() {
   }
   async function addProject() {
     const priority = projects.length + 1;
-    const { id } = await api.createProject('New project', priority);
+    const { id } = await api.createProject('New building', priority);
     await loadProjects();
-    startEdit({ id, name: 'New project', blurb: '', threshold: '2 weeks', nextStep: '' } as Project);
+    startEdit({ id, name: 'New building', blurb: '', threshold: '2 weeks', nextStep: '', houseColor: null } as Project);
   }
 
   // ----- timer -----
@@ -361,10 +390,11 @@ export default function Dashboard() {
       const updates = fieldUpdates(fDraft, fOrig);
       if (res?.taskId && updates.length) await api.updateTaskFields(res.taskId, updates);
       setSaveError(null);
+      celebrate();
     } catch (e: any) {
       setSaveError(`That session didn't reach Notion (${e.message}). It's not saved — log it again below.`);
     }
-    loadProjects(); loadFeed(); loadTasks(); loadReview();
+    loadProjects(); loadFeed(); loadTasks(); loadReview(); loadSummary();
   }
   async function onAddManual() {
     if (!manProject) return;
@@ -380,11 +410,12 @@ export default function Dashboard() {
       const updates = fieldUpdates(fDraft, fOrig);
       if (res?.taskId && updates.length) await api.updateTaskFields(res.taskId, updates);
       setSaveError(null);
+      celebrate();
     } catch (e: any) {
       setSaveError(`That entry didn't reach Notion (${e.message}). It's not saved — try again.`);
     }
     setManFields(BLANK_FIELDS); setManOrig(BLANK_FIELDS);
-    loadProjects(); loadFeed(); loadTasks(); loadReview();
+    loadProjects(); loadFeed(); loadTasks(); loadReview(); loadSummary();
   }
 
   // ----- tasks -----
@@ -427,70 +458,73 @@ export default function Dashboard() {
     ? { body: narrative.nudge }
     : quietProject
       ? {
-        body: `${quietProject.name} has been quiet since ${quietProject.lastMoved}. ${quietProject.recoveryNote
-          ? `Last time it went quiet this long, ${quietProject.recoveryNote} — and it held.`
-          : 'Nothing in your logged activity yet shows what got it moving again last time.'}`,
+        body: `The ${quietProject.name} house misses you — it’s been dark since ${quietProject.lastMoved}. ${quietProject.recoveryNote
+          ? `Last time, ${quietProject.recoveryNote}.`
+          : 'Even a ten-minute visit would light a window.'}`,
       }
-      : { body: 'Nothing is drifting right now. Everything with a stated priority has moved inside its own threshold.' };
+      : { body: 'Nothing is drifting right now. Every house has had a visitor lately — lovely work.' };
 
-  const roadmap = projects.filter(p => p.nextStep).map(p => ({ step: p.nextStep, project: p.name, note: p.nextNote || 'Self-defined next step', target: p.nextTarget || '—' }));
+  const roadmap = projects.filter(p => p.nextStep).map(p => ({ step: p.nextStep, project: p.name, target: p.nextTarget || '—' }));
+
+  const stickers = summary ? [
+    { big: `${summary.streakDays}-day`, label: 'streak', dot: '#e0906c' },
+    { big: `${summary.hoursThisWeek % 1 === 0 ? summary.hoursThisWeek : summary.hoursThisWeek.toFixed(1)}h`, label: 'this week', dot: '#8fb387' },
+    { big: String(summary.visitsThisMonth), label: 'visits this month', dot: '#a48cc9' },
+  ] : [];
 
   const rootStyle: CSSProperties = {
     ['--ac' as string]: ACCENT, ['--ac-soft' as string]: ACCENT_SOFT,
-    minHeight: '100vh', fontFamily: "'Hanken Grotesk', system-ui, sans-serif", background: '#eaeef4',
+    minHeight: '100vh', fontFamily: BODY_FONT, background: '#f2e0c8',
   };
 
   return (
     <div style={rootStyle}>
-      <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '34px 30px 90px', display: 'flex', flexDirection: 'column', gap: '26px' }}>
+      {confettiBurst > 0 && <Confetti burstId={confettiBurst} />}
+      <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '34px 30px 90px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
 
         <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: '20px', flexWrap: 'wrap' }}>
           <div>
-            <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '33px', lineHeight: 1.05, color: '#16233a' }}>{greeting}, {USER_NAME}</div>
-            <div style={{ fontSize: '13.5px', color: '#5a6b84', marginTop: '6px' }}>{dateStr} · a quiet look at where your attention actually went</div>
+            <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 800, fontSize: '36px', lineHeight: 1.05, color: INK }}>{greeting}, {USER_NAME}</div>
+            <div style={{ fontSize: '14px', color: INK_SOFT, marginTop: '6px', fontWeight: 600 }}>{dateStr} · welcome back!</div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '7px', background: '#fff', border: '1px solid #e2e8f1', borderRadius: '11px', padding: '8px 12px' }}>
-              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--ac)' }} />
-              <span style={{ fontSize: '12.5px', fontWeight: 600, color: '#16233a' }}>Personal + Home</span>
-            </div>
-            <div title="Hard-excluded at the app level — filtered on every read" style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#f3f5f9', border: '1px dashed #d3dbe6', borderRadius: '11px', padding: '8px 12px' }}>
-              <span style={{ fontSize: '12px', color: '#94a1b5', textDecoration: 'line-through' }}>Work</span>
-              <span style={{ fontSize: '10.5px', color: '#94a1b5' }}>excluded</span>
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            {stickers.map(s => (
+              <div key={s.label} style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#fffdf8', border: '2px solid #f0e2cf', borderRadius: '16px', padding: '8px 14px', boxShadow: '0 3px 0 #f0e2cf' }}>
+                <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: s.dot }} />
+                <span style={{ fontSize: '12.5px', fontWeight: 800, color: INK }}>{s.big}</span>
+                <span style={{ fontSize: '11.5px', color: INK_SOFT, fontWeight: 600 }}>{s.label}</span>
+              </div>
+            ))}
           </div>
         </div>
 
         {loadError && (
-          <div style={{ background: '#fdf1ef', border: '1px solid #f3d3cc', color: '#9a3b2a', borderRadius: '12px', padding: '12px 16px', fontSize: '13px' }}>
+          <div style={{ background: '#fdf1ef', border: '2px solid #f3d3cc', color: '#9a3b2a', borderRadius: '14px', padding: '12px 16px', fontSize: '13px', fontWeight: 600 }}>
             {loadError}
           </div>
         )}
 
         <div ref={heroRef} style={{ minHeight: '780px' }}>
           {!loaded && (
-            <div style={{ height: '780px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '18px', background: '#dfe6ef', color: '#5a6b84', fontSize: '13.5px' }}>
+            <div style={{ height: '780px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '26px', background: '#e8d3ae', color: INK_SOFT, fontSize: '13.5px', fontWeight: 600 }}>
               Loading your skyline from Notion…
             </div>
           )}
-          {loaded && projects.length > 0 && <Skyline projects={projects} calendarEvents={calendar} truthOverride={narrative?.skyline ?? null} onRequestReorder={() => priorityRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })} />}
+          {loaded && projects.length > 0 && <Skyline projects={projects} truthOverride={narrative?.skyline ?? null} onRequestReorder={() => priorityRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })} />}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1.35fr 1fr', gap: '26px', alignItems: 'start' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1.35fr 1fr', gap: '24px', alignItems: 'start' }}>
 
-          <div ref={priorityRef} style={{ background: '#fff', border: '1px solid #e2e8f1', borderRadius: '18px', padding: '24px 24px 20px', boxShadow: '0 18px 44px rgba(20,35,58,.06)' }}>
+          <div ref={priorityRef} style={stickerCard}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-              <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '21px', color: '#16233a' }}>Priority &amp; where the hours went</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10.5px', color: '#8a97ab', whiteSpace: 'nowrap' }}>
-                <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: 'var(--ac)' }} />worked
-                <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#dce4ee', marginLeft: '6px' }} />quiet
-              </div>
+              <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 800, fontSize: '21px', color: INK }}>Your Buildings</div>
+              <div style={{ fontSize: '11px', color: '#a8927a', fontWeight: 700 }}>drag to shuffle the queue</div>
             </div>
 
             {reorderMsg && (
-              <div style={{ marginTop: '14px', display: 'flex', alignItems: 'center', gap: '8px', background: '#eaf1fa', border: '1px solid #d4e3f5', borderRadius: '11px', padding: '9px 12px', animation: 'db-in .3s ease both' }}>
-                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--ac)' }} />
-                <span style={{ fontSize: '12px', color: '#245089' }}>{reorderMsg}</span>
+              <div style={{ marginTop: '14px', display: 'flex', alignItems: 'center', gap: '8px', background: '#f3ead9', border: '2px solid #e8d7bd', borderRadius: '14px', padding: '9px 13px', animation: 'wf-in .3s ease both' }}>
+                <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: ACCENT }} />
+                <span style={{ fontSize: '12px', color: '#7a5c3e', fontWeight: 700 }}>{reorderMsg}</span>
               </div>
             )}
 
@@ -498,11 +532,14 @@ export default function Dashboard() {
               {projects.map((p, i) => {
                 const dragging = dragId === p.id;
                 const editing = editingId === p.id;
+                const colors = colorsFor(p.houseColor, p.id);
+                const word = trendWord(p);
+                const tc = TREND_COLORS[word];
                 const cardStyle: CSSProperties = {
-                  border: dragging ? '1px solid var(--ac)' : (editing ? '1px solid #cdddef' : '1px solid #e9eef5'),
-                  background: dragging ? '#f4f8fd' : (editing ? '#f9fbfe' : '#ffffff'),
-                  borderRadius: '13px', padding: editing ? '15px 16px' : '13px 15px',
-                  boxShadow: dragging ? '0 12px 26px rgba(47,107,176,.16)' : '0 1px 2px rgba(20,35,58,.03)',
+                  border: dragging ? `2px solid ${ACCENT}` : (editing ? '2px solid #e8d7bd' : '2px solid #f3e8d6'),
+                  background: dragging ? '#fdf4ec' : (editing ? '#fdfaf3' : '#ffffff'),
+                  borderRadius: '18px', padding: editing ? '15px 16px' : '13px 15px',
+                  boxShadow: dragging ? '0 12px 26px rgba(201,111,78,.2)' : '0 2px 0 rgba(150,110,70,.08)',
                   cursor: editing ? 'default' : 'grab', transition: 'box-shadow .2s, border-color .2s, background .2s',
                 };
                 return (
@@ -515,60 +552,85 @@ export default function Dashboard() {
                     {!editing ? (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '11px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '13px' }}>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', cursor: 'grab', flex: '0 0 auto', padding: '2px' }}>
-                          <span style={{ width: '14px', height: '2px', borderRadius: '2px', background: '#c2ccda' }} />
-                          <span style={{ width: '14px', height: '2px', borderRadius: '2px', background: '#c2ccda' }} />
-                          <span style={{ width: '14px', height: '2px', borderRadius: '2px', background: '#c2ccda' }} />
-                        </div>
-                        <div style={{ width: '26px', height: '26px', borderRadius: '50%', background: 'var(--ac-soft)', color: 'var(--ac)', fontSize: '12.5px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }}>{i + 1}</div>
+                        <div style={{ width: '30px', height: '30px', borderRadius: '10px', background: colors.body, flex: '0 0 auto', boxShadow: 'inset 0 -3px 0 rgba(70,45,20,.15)' }} />
+                        <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: '#f3ead9', color: '#a06a2e', fontSize: '12px', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }}>{i + 1}</div>
                         <div style={{ minWidth: 0, flex: 1 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span style={{ fontSize: '15px', fontWeight: 600, color: '#16233a' }}>{p.name}</span>
-                            {p.quiet && <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.06em', color: '#a06a2e', background: '#fbf0e2', border: '1px solid #f0dcc2', borderRadius: '20px', padding: '2px 8px' }}>QUIET</span>}
+                            <span style={{ fontSize: '15px', fontWeight: 800, color: INK }}>{p.name}</span>
+                            <span style={{ fontSize: '10px', fontWeight: 800, letterSpacing: '.05em', textTransform: 'uppercase', color: tc.fg, background: tc.bg, border: `2px solid ${tc.bd}`, borderRadius: '20px', padding: '2px 9px' }}>{word}</span>
                           </div>
-                          <div style={{ fontSize: '11.5px', color: '#8a97ab', marginTop: '2px' }}>Last activity {p.lastMoved}</div>
+                          <div style={{ fontSize: '11.5px', color: '#a8927a', marginTop: '2px', fontWeight: 600 }}>last visited {p.lastMoved}</div>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px', flex: '0 0 auto' }}>
                           <div style={{ display: 'flex', gap: '4px' }}>
                             {p.week.map((on, di) => (
-                              <span key={di} style={{ width: '9px', height: '9px', borderRadius: '50%', background: on ? 'var(--ac)' : '#dce4ee', display: 'inline-block' }} />
+                              <span key={di} style={{ width: '10px', height: '10px', borderRadius: '50%', background: on ? colors.shade : '#eee3d0', display: 'inline-block' }} />
                             ))}
                           </div>
-                          <div style={{ fontSize: '11px', color: '#5a6b84' }}><b style={{ color: '#16233a' }}>{p.hours === 0 ? '0h' : `${p.hours}h`}</b> this week</div>
+                          <div style={{ fontSize: '11px', color: INK_SOFT, fontWeight: 600 }}><b style={{ color: INK }}>{p.hours === 0 ? '0h' : `${p.hours}h`}</b> this week</div>
                         </div>
-                        <div onClick={() => setExpandedTasks(v => (v === p.id ? null : p.id))} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 600, color: expandedTasks === p.id ? 'var(--ac)' : '#8a97ab', padding: '5px 9px', border: `1px solid ${expandedTasks === p.id ? '#cdddef' : '#e2e8f1'}`, borderRadius: '8px', flex: '0 0 auto', whiteSpace: 'nowrap' }}>{tasksFor(p.id).length} task{tasksFor(p.id).length === 1 ? '' : 's'}</div>
-                        <div onClick={() => startEdit(p)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 600, color: '#8a97ab', padding: '5px 9px', border: '1px solid #e2e8f1', borderRadius: '8px', flex: '0 0 auto' }}>Edit</div>
+                        <div onClick={() => setExpandedTasks(v => (v === p.id ? null : p.id))} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: expandedTasks === p.id ? ACCENT : '#a8927a', padding: '5px 10px', border: `2px solid ${expandedTasks === p.id ? '#e8d7bd' : '#f0e2cf'}`, borderRadius: '10px', flex: '0 0 auto', whiteSpace: 'nowrap' }}>{tasksFor(p.id).length} task{tasksFor(p.id).length === 1 ? '' : 's'}</div>
+                        <div onClick={() => startEdit(p)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '5px 10px', border: '2px solid #f0e2cf', borderRadius: '10px', flex: '0 0 auto' }}>Edit</div>
                         </div>
                         {expandedTasks === p.id && (
-                          <div style={{ background: '#fbfcfe', border: '1px solid #eef2f7', borderRadius: '11px', padding: '11px 13px' }}>
-                            {tasksFor(p.id).length === 0 && <div style={{ fontSize: '12px', color: '#8a97ab', paddingBottom: '4px' }}>No open tasks — add one below.</div>}
+                          <div style={{ background: '#fbf6ec', border: '2px solid #f0e2cf', borderRadius: '14px', padding: '11px 13px' }}>
+                            {tasksFor(p.id).length === 0 && <div style={{ fontSize: '12px', color: '#a8927a', paddingBottom: '4px', fontWeight: 600 }}>No open tasks — add one below.</div>}
                             {tasksFor(p.id).map(t => (
                               <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '9px', padding: '5px 0' }}>
-                                <span onClick={() => completeTaskById(t.id)} title="Mark done in Notion" style={{ width: '16px', height: '16px', borderRadius: '5px', border: '1.5px solid #cbd6e4', cursor: 'pointer', flex: '0 0 auto', background: '#fff' }} />
-                                <span style={{ fontSize: '13px', color: '#16233a', flex: 1, minWidth: 0 }}>{t.name}</span>
-                                {t.isNextStep && <span style={{ fontSize: '9.5px', fontWeight: 700, letterSpacing: '.06em', color: 'var(--ac)', background: 'var(--ac-soft)', border: '1px solid #d4e3f5', borderRadius: '20px', padding: '2px 7px', flex: '0 0 auto' }}>NEXT</span>}
+                                <span onClick={() => completeTaskById(t.id)} title="Mark done in Notion" style={{ width: '16px', height: '16px', borderRadius: '5px', border: '2px solid #dcc9ab', cursor: 'pointer', flex: '0 0 auto', background: '#fff' }} />
+                                <span style={{ fontSize: '13px', color: INK, flex: 1, minWidth: 0, fontWeight: 600 }}>{t.name}</span>
+                                {t.isNextStep && <span style={{ fontSize: '9.5px', fontWeight: 800, letterSpacing: '.06em', color: ACCENT, background: ACCENT_SOFT, border: '2px solid #e8d7bd', borderRadius: '20px', padding: '2px 7px', flex: '0 0 auto' }}>NEXT</span>}
                               </div>
                             ))}
                             <div style={{ display: 'flex', gap: '7px', marginTop: '8px' }}>
                               <input value={newTaskName} onChange={e => setNewTaskName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addTaskTo(p.id)} placeholder="Add a task…" style={{ ...input, fontSize: '12.5px', padding: '7px 10px' }} />
-                              <div onClick={() => addTaskTo(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 700, color: 'var(--ac)', background: 'var(--ac-soft)', border: '1px solid #d4e3f5', borderRadius: '9px', padding: '7px 13px', whiteSpace: 'nowrap' }}>Add</div>
+                              <div onClick={() => addTaskTo(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#a06a2e', background: ACCENT_SOFT, border: '2px solid #e8d7bd', borderRadius: '11px', padding: '7px 13px', whiteSpace: 'nowrap' }}>Add</div>
                             </div>
                           </div>
                         )}
                       </div>
                     ) : (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '9px' }}>
-                        <div style={{ fontSize: '10.5px', letterSpacing: '.12em', textTransform: 'uppercase', color: '#8a97ab', fontWeight: 700 }}>Editing project #{i + 1}</div>
-                        <input value={draft?.name ?? ''} onChange={e => setDraft(d => d && { ...d, name: e.target.value })} onKeyDown={e => e.key === 'Enter' && saveEdit(p.id)} placeholder="Project name" style={{ ...input, fontSize: '14px', fontWeight: 600 }} />
+                        <div style={{ fontSize: '10.5px', letterSpacing: '.12em', textTransform: 'uppercase', color: '#a8927a', fontWeight: 800 }}>Redecorating house #{i + 1}</div>
+                        <input value={draft?.name ?? ''} onChange={e => setDraft(d => d && { ...d, name: e.target.value })} onKeyDown={e => e.key === 'Enter' && saveEdit(p.id)} placeholder="Project name" style={{ ...input, fontSize: '14px', fontWeight: 700 }} />
                         <input value={draft?.blurb ?? ''} onChange={e => setDraft(d => d && { ...d, blurb: e.target.value })} onKeyDown={e => e.key === 'Enter' && saveEdit(p.id)} placeholder="What is it? (a short description)" style={input} />
                         <div style={{ display: 'flex', gap: '9px' }}>
-                          <input value={draft?.threshold ?? ''} onChange={e => setDraft(d => d && { ...d, threshold: e.target.value })} onKeyDown={e => e.key === 'Enter' && saveEdit(p.id)} placeholder="Check-in threshold (e.g. 2 weeks)" style={{ ...input, flex: 1 }} />
-                          <input value={draft?.nextStep ?? ''} onChange={e => setDraft(d => d && { ...d, nextStep: e.target.value })} onKeyDown={e => e.key === 'Enter' && saveEdit(p.id)} placeholder="Next step (roadmap)" style={{ ...input, flex: 1.4 }} />
+                          <input value={draft?.threshold ?? ''} onChange={e => setDraft(d => d && { ...d, threshold: e.target.value })} onKeyDown={e => e.key === 'Enter' && saveEdit(p.id)} placeholder="Check in after (e.g. 2 weeks)" style={{ ...input, flex: 1 }} />
+                          <input value={draft?.nextStep ?? ''} onChange={e => setDraft(d => d && { ...d, nextStep: e.target.value })} onKeyDown={e => e.key === 'Enter' && saveEdit(p.id)} placeholder="Next little step" style={{ ...input, flex: 1.4 }} />
                         </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '2px' }}>
+                          <div style={{ fontSize: '10.5px', letterSpacing: '.12em', textTransform: 'uppercase', color: '#a8927a', fontWeight: 800 }}>Color</div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
+                            {HOUSE_COLORS.map((c, ci) => {
+                              const active = draft?.houseColor === String(ci);
+                              return (
+                                <div key={ci} onClick={() => setDraft(d => d && ({ ...d, houseColor: String(ci), colorHexInput: '' }))} style={{
+                                  width: '28px', height: '28px', borderRadius: '9px', background: c.body, cursor: 'pointer',
+                                  boxShadow: active ? 'inset 0 0 0 3px #4a3a2e' : 'inset 0 0 0 2px rgba(70,45,20,.12)',
+                                }} />
+                              );
+                            })}
+                            <input
+                              value={draft?.colorHexInput ?? ''}
+                              onChange={e => {
+                                const raw = e.target.value;
+                                setDraft(d => {
+                                  if (!d) return d;
+                                  const norm = raw.startsWith('#') ? raw : `#${raw}`;
+                                  return { ...d, colorHexInput: raw, houseColor: HEX_RE.test(norm) ? norm.toLowerCase() : d.houseColor };
+                                });
+                              }}
+                              onKeyDown={e => e.key === 'Enter' && saveEdit(p.id)}
+                              placeholder="#f2a48c" style={{ ...input, width: '110px' }}
+                            />
+                          </div>
+                        </div>
+
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginTop: '2px' }}>
                           <div style={{ display: 'flex', gap: '8px' }}>
-                            <div onClick={() => removeProject(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 600, color: '#b4453b', padding: '8px 13px', borderRadius: '9px', border: '1px solid #f0d3cf' }}>Archive</div>
-                            <div onClick={() => saveEdit(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 700, color: '#fff', background: 'var(--ac)', padding: '8px 16px', borderRadius: '9px' }}>Done</div>
+                            <div onClick={() => removeProject(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#b4453b', padding: '8px 14px', borderRadius: '12px', border: '2px solid #f0d3cf' }}>Archive</div>
+                            <div onClick={() => saveEdit(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#fff', background: ACCENT, padding: '8px 17px', borderRadius: '12px', boxShadow: `0 3px 0 ${ACCENT_DARK}` }}>Done</div>
                           </div>
                         </div>
                       </div>
@@ -577,70 +639,74 @@ export default function Dashboard() {
                 );
               })}
 
-              <div onClick={addProject} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '12.5px', fontWeight: 600, color: 'var(--ac)', border: '1.5px dashed #c7d6e8', borderRadius: '12px', padding: '11px', marginTop: '2px' }}>+ Add a project</div>
+              <div onClick={addProject} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, color: ACCENT, border: '2px dashed #e8cdb8', borderRadius: '16px', padding: '12px', marginTop: '2px' }}>+ New building</div>
             </div>
           </div>
 
-          <div style={{ background: '#fff', border: '1px solid #e2e8f1', borderRadius: '18px', padding: '24px', boxShadow: '0 18px 44px rgba(20,35,58,.06)' }}>
-            <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '21px', color: '#16233a' }}>What's coming</div>
+          <div style={{ ...stickerCard, padding: '24px' }}>
+            <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 800, fontSize: '21px', color: INK }}>On the horizon</div>
 
-            <div style={{ fontSize: '10.5px', letterSpacing: '.14em', textTransform: 'uppercase', color: '#8a97ab', fontWeight: 700, marginTop: '18px' }}>Locked in · Google Calendar</div>
+            <div style={{ fontSize: '10.5px', letterSpacing: '.14em', textTransform: 'uppercase', color: '#a8927a', fontWeight: 800, marginTop: '18px' }}>Google Calendar</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '9px', marginTop: '11px' }}>
-              {calendarState === 'unconfigured' && <div style={{ fontSize: '12.5px', color: '#8a97ab' }}>Google Calendar isn't configured yet.</div>}
+              {calendarState === 'unconfigured' && <div style={{ fontSize: '12.5px', color: '#a8927a', fontWeight: 600 }}>Google Calendar isn't configured yet.</div>}
               {calendarState === 'unauthorized' && (
-                <a href={calendarAuthUrl || '#'} target="_blank" rel="noreferrer" style={{ fontSize: '12.5px', color: 'var(--ac)', fontWeight: 600, textDecoration: 'none' }}>Connect Google Calendar →</a>
+                <a href={calendarAuthUrl || '#'} target="_blank" rel="noreferrer" style={{ fontSize: '12.5px', color: ACCENT, fontWeight: 800, textDecoration: 'none' }}>Connect Google Calendar →</a>
               )}
-              {calendarState === 'ready' && calendar.length === 0 && <div style={{ fontSize: '12.5px', color: '#8a97ab' }}>Nothing locked in over the next 30 days.</div>}
-              {calendar.map(c => (
-                <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '11px 13px', borderRadius: '12px', background: 'var(--ac-soft)', border: '1px solid #d4e3f5' }}>
-                  <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: 'var(--ac)', flex: '0 0 auto', boxShadow: '0 0 0 4px rgba(47,107,176,.14)' }} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 600, color: '#16233a' }}>{c.title}</div>
-                    <div style={{ fontSize: '11px', color: '#5a6b84' }}>{c.project} · {c.type}</div>
+              {calendarState === 'ready' && calendar.length === 0 && <div style={{ fontSize: '12.5px', color: '#a8927a', fontWeight: 600 }}>Nothing locked in over the next 30 days.</div>}
+              {calendar.map(c => {
+                const cp = projects.find(p => p.name === c.project);
+                const dot = cp ? colorsFor(cp.houseColor, cp.id).body : ACCENT;
+                return (
+                  <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '11px 14px', borderRadius: '16px', background: '#f6efe1', border: '2px solid #ecdfc8' }}>
+                    <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: dot, flex: '0 0 auto', boxShadow: '0 0 0 4px rgba(201,111,78,.12)' }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '13px', fontWeight: 800, color: INK }}>{c.title}</div>
+                      <div style={{ fontSize: '11px', color: INK_SOFT, fontWeight: 600 }}>{c.project} · {c.type}</div>
+                    </div>
+                    <div style={{ textAlign: 'right', flex: '0 0 auto' }}>
+                      <div style={{ fontSize: '12px', fontWeight: 800, color: ACCENT, whiteSpace: 'nowrap' }}>{c.date}</div>
+                      <div style={{ fontSize: '10.5px', color: '#a8927a', fontWeight: 600 }}>{c.meta}</div>
+                    </div>
                   </div>
-                  <div style={{ textAlign: 'right', flex: '0 0 auto' }}>
-                    <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--ac)', whiteSpace: 'nowrap' }}>{c.date}</div>
-                    <div style={{ fontSize: '10.5px', color: '#8a97ab' }}>{c.meta}</div>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
-            <div style={{ fontSize: '10.5px', letterSpacing: '.14em', textTransform: 'uppercase', color: '#8a97ab', fontWeight: 700, marginTop: '20px' }}>Your roadmap · next step</div>
+            <div style={{ fontSize: '10.5px', letterSpacing: '.14em', textTransform: 'uppercase', color: '#a8927a', fontWeight: 800, marginTop: '20px' }}>Next right thing</div>
             <div style={{ display: 'flex', flexDirection: 'column', marginTop: '9px' }}>
               {roadmap.map((r, i) => (
-                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '11px', padding: '11px 2px', borderBottom: '1px solid #eef2f7' }}>
-                  <span style={{ width: '16px', height: '16px', borderRadius: '5px', border: '1.5px solid #cbd6e4', flex: '0 0 auto', marginTop: '1px' }} />
+                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '11px', padding: '11px 2px', borderBottom: '2px dotted #eee1cd' }}>
+                  <span style={{ width: '17px', height: '17px', borderRadius: '6px', border: '2px solid #dcc9ab', flex: '0 0 auto', marginTop: '1px' }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: '13px', color: '#16233a' }}>{r.step}</div>
-                    <div style={{ fontSize: '11px', color: '#8a97ab', marginTop: '1px' }}>{r.project} · {r.note}</div>
+                    <div style={{ fontSize: '13px', color: INK, fontWeight: 600 }}>{r.step}</div>
+                    <div style={{ fontSize: '11px', color: '#a8927a', marginTop: '1px', fontWeight: 600 }}>{r.project}</div>
                   </div>
-                  <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--ac)', whiteSpace: 'nowrap', flex: '0 0 auto', marginTop: '1px' }}>{r.target}</div>
+                  <div style={{ fontSize: '11px', fontWeight: 800, color: ACCENT, whiteSpace: 'nowrap', flex: '0 0 auto', marginTop: '1px' }}>{r.target}</div>
                 </div>
               ))}
             </div>
 
-            <div style={{ marginTop: '20px', background: 'linear-gradient(180deg,#f6f2ec,#fbf8f3)', border: '1px solid #ece2d3', borderRadius: '14px', padding: '15px 16px' }}>
+            <div style={{ marginTop: '20px', background: 'linear-gradient(180deg,#f2ecfb,#f9f6fd)', border: '2px solid #e2d7f2', borderRadius: '18px', padding: '16px 17px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
-                <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: '#c98b45' }} />
-                <span style={{ fontSize: '10.5px', letterSpacing: '.1em', textTransform: 'uppercase', fontWeight: 700, color: '#a06a2e' }}>A gentle nudge</span>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#9b7fc7' }} />
+                <span style={{ fontSize: '10.5px', letterSpacing: '.1em', textTransform: 'uppercase', fontWeight: 800, color: '#7d6a9e' }}>A note from the neighborhood</span>
               </div>
-              <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '16px', lineHeight: 1.4, color: '#5a4326', marginTop: '9px' }}>{nudge.body}</div>
+              <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 600, fontSize: '15.5px', lineHeight: 1.45, color: '#584a72', marginTop: '9px' }}>{nudge.body}</div>
             </div>
           </div>
         </div>
 
         {review && (
-          <div style={{ background: '#fff', border: '1px solid #e2e8f1', borderRadius: '18px', padding: '24px', boxShadow: '0 18px 44px rgba(20,35,58,.06)' }}>
+          <div style={stickerCard}>
             <div onClick={() => setReviewOpen(o => !o)} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '14px', cursor: 'pointer' }}>
               <div>
-                <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '21px', color: '#16233a' }}>Your week in the city</div>
-                <div style={{ fontSize: '12.5px', color: '#5a6b84', marginTop: '4px' }}>
-                  <b style={{ color: '#16233a' }}>{review.totalHoursThisWeek}h</b> across {review.activeProjectsThisWeek} project{review.activeProjectsThisWeek === 1 ? '' : 's'} · {review.sessionsThisWeek} session{review.sessionsThisWeek === 1 ? '' : 's'}
-                  {review.totalHoursLastWeek > 0 && <span style={{ color: '#8a97ab' }}> · {review.totalHoursThisWeek >= review.totalHoursLastWeek ? '▲' : '▼'} vs {review.totalHoursLastWeek}h last week</span>}
+                <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 800, fontSize: '21px', color: INK }}>Your week in the neighborhood</div>
+                <div style={{ fontSize: '12.5px', color: INK_SOFT, marginTop: '4px', fontWeight: 600 }}>
+                  <b style={{ color: INK }}>{review.totalHoursThisWeek}h</b> across {review.activeProjectsThisWeek} house{review.activeProjectsThisWeek === 1 ? '' : 's'} · {review.sessionsThisWeek} visit{review.sessionsThisWeek === 1 ? '' : 's'}
+                  {review.totalHoursLastWeek > 0 && <span style={{ color: '#a8927a' }}> · {review.totalHoursThisWeek >= review.totalHoursLastWeek ? '▲' : '▼'} vs {review.totalHoursLastWeek}h last week</span>}
                 </div>
               </div>
-              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--ac)', whiteSpace: 'nowrap', padding: '5px 9px', border: '1px solid #d4e3f5', borderRadius: '8px' }}>{reviewOpen ? 'Hide' : 'Look back'}</div>
+              <div style={{ fontSize: '11px', fontWeight: 800, color: ACCENT, whiteSpace: 'nowrap', padding: '5px 9px', border: '2px solid #e8d7bd', borderRadius: '10px' }}>{reviewOpen ? 'Hide' : 'Look back'}</div>
             </div>
 
             {reviewOpen && (
@@ -648,22 +714,22 @@ export default function Dashboard() {
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
                   {[
                     { k: 'This week', v: `${review.totalHoursThisWeek}h` },
-                    { k: 'Sessions', v: String(review.sessionsThisWeek) },
+                    { k: 'Visits', v: String(review.sessionsThisWeek) },
                     { k: 'Streak', v: `${review.longestStreakDays} day${review.longestStreakDays === 1 ? '' : 's'}` },
                     ...(review.busiestDay ? [{ k: 'Busiest', v: `${review.busiestDay.label} · ${review.busiestDay.hours}h` }] : []),
                   ].map(s => (
-                    <div key={s.k} style={{ flex: '1 1 120px', background: '#fbfcfe', border: '1px solid #eef2f7', borderRadius: '12px', padding: '12px 14px' }}>
-                      <div style={{ fontSize: '10.5px', letterSpacing: '.1em', textTransform: 'uppercase', color: '#8a97ab', fontWeight: 700 }}>{s.k}</div>
-                      <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '22px', color: '#16233a', marginTop: '4px' }}>{s.v}</div>
+                    <div key={s.k} style={{ flex: '1 1 120px', background: '#fbf6ec', border: '2px solid #f0e2cf', borderRadius: '16px', padding: '12px 14px' }}>
+                      <div style={{ fontSize: '10.5px', letterSpacing: '.1em', textTransform: 'uppercase', color: '#a8927a', fontWeight: 800 }}>{s.k}</div>
+                      <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 800, fontSize: '22px', color: INK, marginTop: '4px' }}>{s.v}</div>
                     </div>
                   ))}
                 </div>
 
                 {(review.rising.length > 0 || review.fading.length > 0 || review.wentDark.length > 0) && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                    {review.rising.map(n => <span key={`r${n}`} style={{ fontSize: '11.5px', fontWeight: 600, color: '#2a8a54', background: '#eaf7ef', border: '1px solid #cfead9', borderRadius: '20px', padding: '4px 11px' }}>▲ {n}</span>)}
-                    {review.fading.map(n => <span key={`f${n}`} style={{ fontSize: '11.5px', fontWeight: 600, color: '#a06a2e', background: '#fbf0e2', border: '1px solid #f0dcc2', borderRadius: '20px', padding: '4px 11px' }}>▼ {n}</span>)}
-                    {review.wentDark.map(n => <span key={`d${n}`} style={{ fontSize: '11.5px', fontWeight: 600, color: '#7a869a', background: '#f1f4f8', border: '1px solid #e0e7f0', borderRadius: '20px', padding: '4px 11px' }}>◗ {n} went quiet</span>)}
+                    {review.rising.map(n => <span key={`r${n}`} style={{ fontSize: '11.5px', fontWeight: 800, color: TREND_COLORS.buzzing.fg, background: TREND_COLORS.buzzing.bg, border: `2px solid ${TREND_COLORS.buzzing.bd}`, borderRadius: '20px', padding: '4px 11px' }}>▲ {n}</span>)}
+                    {review.fading.map(n => <span key={`f${n}`} style={{ fontSize: '11.5px', fontWeight: 800, color: TREND_COLORS.steady.fg, background: TREND_COLORS.steady.bg, border: `2px solid ${TREND_COLORS.steady.bd}`, borderRadius: '20px', padding: '4px 11px' }}>▼ {n}</span>)}
+                    {review.wentDark.map(n => <span key={`d${n}`} style={{ fontSize: '11.5px', fontWeight: 800, color: TREND_COLORS.napping.fg, background: TREND_COLORS.napping.bg, border: `2px solid ${TREND_COLORS.napping.bd}`, borderRadius: '20px', padding: '4px 11px' }}>◗ {n} went napping</span>)}
                   </div>
                 )}
 
@@ -672,12 +738,12 @@ export default function Dashboard() {
                     const max = Math.max(1, ...review.byProject.map(x => x.hoursThisWeek));
                     return (
                       <div key={p.projectId} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                        <div style={{ width: '128px', fontSize: '12.5px', color: '#16233a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{p.name}</div>
-                        <div style={{ flex: 1, height: '9px', background: '#eef2f7', borderRadius: '20px', overflow: 'hidden' }}>
-                          <div style={{ width: `${Math.round((p.hoursThisWeek / max) * 100)}%`, height: '100%', background: 'var(--ac)', borderRadius: '20px' }} />
+                        <div style={{ width: '128px', fontSize: '12.5px', color: INK, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '0 0 auto', fontWeight: 600 }}>{p.name}</div>
+                        <div style={{ flex: 1, height: '9px', background: '#f3ead9', borderRadius: '20px', overflow: 'hidden' }}>
+                          <div style={{ width: `${Math.round((p.hoursThisWeek / max) * 100)}%`, height: '100%', background: ACCENT, borderRadius: '20px' }} />
                         </div>
-                        <div style={{ width: '96px', textAlign: 'right', fontSize: '11.5px', color: '#5a6b84', flex: '0 0 auto', whiteSpace: 'nowrap' }}>
-                          <b style={{ color: '#16233a' }}>{p.hoursThisWeek}h</b>{p.delta !== 0 && <span style={{ color: p.delta > 0 ? '#2a8a54' : '#a06a2e' }}> {p.delta > 0 ? '▲' : '▼'}{Math.abs(p.delta)}</span>}
+                        <div style={{ width: '96px', textAlign: 'right', fontSize: '11.5px', color: INK_SOFT, flex: '0 0 auto', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                          <b style={{ color: INK }}>{p.hoursThisWeek}h</b>{p.delta !== 0 && <span style={{ color: p.delta > 0 ? TREND_COLORS.buzzing.fg : TREND_COLORS.steady.fg }}> {p.delta > 0 ? '▲' : '▼'}{Math.abs(p.delta)}</span>}
                         </div>
                       </div>
                     );
@@ -688,49 +754,49 @@ export default function Dashboard() {
           </div>
         )}
 
-        <div style={{ background: '#fff', border: '1px solid #e2e8f1', borderRadius: '18px', padding: '24px', boxShadow: '0 18px 44px rgba(20,35,58,.06)' }}>
-          <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '21px', color: '#16233a' }}>Capture activity</div>
+        <div style={stickerCard}>
+          <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 800, fontSize: '21px', color: INK }}>Neighborhood Activities</div>
 
           {saveError && (
-            <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', background: '#fdf1ef', border: '1px solid #f3d3cc', color: '#9a3b2a', borderRadius: '11px', padding: '10px 13px', fontSize: '12.5px' }}>
+            <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', background: '#fdf1ef', border: '2px solid #f3d3cc', color: '#9a3b2a', borderRadius: '14px', padding: '10px 13px', fontSize: '12.5px', fontWeight: 600 }}>
               <span>{saveError}</span>
-              <span onClick={() => setSaveError(null)} style={{ cursor: 'pointer', fontWeight: 700, padding: '0 4px' }}>×</span>
+              <span onClick={() => setSaveError(null)} style={{ cursor: 'pointer', fontWeight: 800, padding: '0 4px' }}>×</span>
             </div>
           )}
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '22px', marginTop: '18px' }}>
 
-            <div style={{ border: '1px solid #e6ecf4', borderRadius: '15px', padding: '18px', background: '#fbfcfe' }}>
+            <div style={{ border: '2px solid #ecdfc8', borderRadius: '20px', padding: '18px', background: '#fdf9f1' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div style={{ fontSize: '13px', fontWeight: 700, color: '#16233a' }}>Live activity</div>
+                <div style={{ fontSize: '13px', fontWeight: 800, color: INK }}>Right now</div>
                 {capMode === 'running' && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
-                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#46d17f', animation: 'db-pulse 2s ease-out infinite' }} />
-                    <span style={{ fontSize: '11px', color: '#2a8a54', fontWeight: 600 }}>tracking</span>
+                    <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#7ebe8c', animation: 'wf-pulse 2s ease-out infinite' }} />
+                    <span style={{ fontSize: '11px', color: '#4d8a5e', fontWeight: 800 }}>the kettle's on</span>
                   </div>
                 )}
               </div>
 
-              <div style={{ fontFamily: "'Newsreader',Georgia,serif", fontSize: '44px', letterSpacing: '.01em', color: (capMode === 'running' || capMode === 'noting') ? '#16233a' : '#b7c2d1', marginTop: '10px', fontVariantNumeric: 'tabular-nums' }}>{fmtClock(capSeconds)}</div>
-              <div style={{ fontSize: '12px', color: '#8a97ab', minHeight: '16px' }}>
-                {capMode === 'picking' ? 'Pick a project to start the clock' : (capProject && projects.find(p => p.id === capProject)?.name) || 'Nothing tracking right now'}
+              <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 800, fontSize: '46px', letterSpacing: '.01em', color: (capMode === 'running' || capMode === 'noting') ? INK : '#d8c8b2', marginTop: '10px', fontVariantNumeric: 'tabular-nums' }}>{fmtClock(capSeconds)}</div>
+              <div style={{ fontSize: '12px', color: INK_SOFT, minHeight: '16px', fontWeight: 600 }}>
+                {capMode === 'picking' ? 'Which house are you popping into?' : (capProject && projects.find(p => p.id === capProject)?.name) || 'The whole street is quiet — for now'}
               </div>
 
               {capMode === 'picking' && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '7px', marginTop: '14px' }}>
                   {projects.map(p => (
-                    <div key={p.id} onClick={() => pick(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 600, padding: '7px 12px', borderRadius: '9px', background: '#fff', border: '1px solid #dbe3ee', color: '#16233a' }}>{p.name}</div>
+                    <div key={p.id} onClick={() => pick(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, padding: '8px 13px', borderRadius: '12px', background: '#fff', border: `2px solid ${colorsFor(p.houseColor, p.id).body}`, color: INK }}>{p.name}</div>
                   ))}
                 </div>
               )}
 
               {capMode === 'noting' && (
                 <div style={{ marginTop: '14px' }}>
-                  <div style={{ fontSize: '12px', color: '#5a6b84', marginBottom: '7px' }}>What happened?</div>
-                  <input value={capNote} onChange={e => setCapNote(e.target.value)} onKeyDown={e => e.key === 'Enter' && onSaveSession()} autoFocus placeholder="e.g. Worked through the second verse" style={{ ...input, fontSize: '13px', padding: '10px 12px', borderRadius: '10px' }} />
+                  <div style={{ fontSize: '12px', color: INK_SOFT, marginBottom: '7px', fontWeight: 700 }}>What happened in there?</div>
+                  <input value={capNote} onChange={e => setCapNote(e.target.value)} onKeyDown={e => e.key === 'Enter' && onSaveSession()} autoFocus placeholder="e.g. Worked through the second verse" style={{ ...input, fontSize: '13px', padding: '10px 13px', borderRadius: '13px' }} />
                   {capProject && (
                     <div style={{ marginTop: '11px' }}>
-                      <div style={{ fontSize: '11px', color: '#5a6b84', marginBottom: '6px' }}>Log against · <span style={{ color: '#8a97ab' }}>defaults to the next step</span></div>
+                      <div style={{ fontSize: '11px', color: INK_SOFT, marginBottom: '6px', fontWeight: 700 }}>Log against · <span style={{ color: '#a8927a' }}>defaults to the next step</span></div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                         {tasksFor(capProject).map(t => (
                           <div key={t.id} onClick={() => chooseCapTask(t.id)} style={taskChip(capTaskId === t.id || (capTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</div>
@@ -741,32 +807,33 @@ export default function Dashboard() {
                     </div>
                   )}
                   <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-                    <div onClick={onSaveSession} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '12.5px', fontWeight: 700, padding: '10px', borderRadius: '10px', background: 'var(--ac)', color: '#fff' }}>Save to Notion</div>
-                    <div onClick={onDiscard} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '12.5px', fontWeight: 600, padding: '10px 14px', borderRadius: '10px', background: 'transparent', border: '1px solid #dbe3ee', color: '#5a6b84' }}>Discard</div>
+                    <div onClick={onSaveSession} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '12.5px', fontWeight: 800, padding: '10px', borderRadius: '13px', background: ACCENT, color: '#fff', boxShadow: `0 3px 0 ${ACCENT_DARK}` }}>Save to Notion</div>
+                    <div onClick={onDiscard} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '12.5px', fontWeight: 800, padding: '10px 14px', borderRadius: '13px', background: 'transparent', border: '2px solid #ecdcc5', color: INK_SOFT }}>Never mind</div>
                   </div>
                 </div>
               )}
 
               {capMode === 'idle' && (
-                <div onClick={onStart} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 700, padding: '11px', borderRadius: '11px', background: 'var(--ac)', color: '#fff', marginTop: '16px' }}>Start a live activity</div>
+                <div onClick={onStart} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px', borderRadius: '14px', background: ACCENT, color: '#fff', marginTop: '16px', boxShadow: `0 3px 0 ${ACCENT_DARK}` }}>Pop into a building &amp; start the clock</div>
               )}
               {capMode === 'running' && (
-                <div onClick={onStop} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 700, padding: '11px', borderRadius: '11px', background: '#16233a', color: '#fff', marginTop: '16px' }}>Stop &amp; note</div>
+                <div onClick={onStop} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px', borderRadius: '14px', background: INK, color: '#fff', marginTop: '16px' }}>Stop &amp; tell the tale</div>
               )}
             </div>
 
-            <div style={{ border: '1px solid #e6ecf4', borderRadius: '15px', padding: '18px', background: '#fbfcfe' }}>
-              <div style={{ fontSize: '13px', fontWeight: 700, color: '#16233a' }}>Log it after the fact</div>
+            <div style={{ border: '2px solid #ecdfc8', borderRadius: '20px', padding: '18px', background: '#fdf9f1' }}>
+              <div style={{ fontSize: '13px', fontWeight: 800, color: INK }}>Manual Entry</div>
 
-              <div style={{ fontSize: '11px', color: '#5a6b84', marginTop: '13px', marginBottom: '7px' }}>Project</div>
+              <div style={{ fontSize: '11px', color: INK_SOFT, marginTop: '13px', marginBottom: '7px', fontWeight: 700 }}>Which building?</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '7px' }}>
                 {projects.map(p => {
                   const active = manProject === p.id;
+                  const colors = colorsFor(p.houseColor, p.id);
                   return (
                     <div key={p.id} onClick={() => chooseManProject(p.id)} style={{
-                      cursor: 'pointer', fontSize: '12px', fontWeight: 600, padding: '7px 11px', borderRadius: '9px',
-                      background: active ? 'var(--ac)' : '#fff', color: active ? '#fff' : '#16233a',
-                      border: active ? '1px solid var(--ac)' : '1px solid #dbe3ee', transition: 'all .15s',
+                      cursor: 'pointer', fontSize: '12px', fontWeight: 800, padding: '8px 12px', borderRadius: '12px',
+                      background: active ? ACCENT : '#fff', color: active ? '#fff' : INK,
+                      border: active ? `2px solid ${ACCENT}` : `2px solid ${colors.body}`, transition: 'all .15s',
                     }}>{p.name}</div>
                   );
                 })}
@@ -774,7 +841,7 @@ export default function Dashboard() {
 
               {manProject && (
                 <div style={{ marginTop: '13px' }}>
-                  <div style={{ fontSize: '11px', color: '#5a6b84', marginBottom: '6px' }}>Log against · <span style={{ color: '#8a97ab' }}>defaults to the next step</span></div>
+                  <div style={{ fontSize: '11px', color: INK_SOFT, marginBottom: '6px', fontWeight: 700 }}>Log against · <span style={{ color: '#a8927a' }}>defaults to the next step</span></div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                     {tasksFor(manProject).map(t => (
                       <div key={t.id} onClick={() => chooseManTask(t.id)} style={taskChip(manTaskId === t.id || (manTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</div>
@@ -786,45 +853,49 @@ export default function Dashboard() {
               )}
 
               <div style={{ display: 'flex', gap: '9px', marginTop: '13px' }}>
-                <input value={manDur} onChange={e => setManDur(e.target.value)} onKeyDown={e => e.key === 'Enter' && onAddManual()} placeholder="45m or 4h" style={{ ...input, width: '96px', borderRadius: '10px' }} />
-                <input value={manNote} onChange={e => setManNote(e.target.value)} onKeyDown={e => e.key === 'Enter' && onAddManual()} placeholder="What happened?" style={{ ...input, flex: 1, fontSize: '13px', borderRadius: '10px' }} />
+                <input value={manDur} onChange={e => setManDur(e.target.value)} onKeyDown={e => e.key === 'Enter' && onAddManual()} placeholder="45m or 4h" style={{ ...input, width: '96px', borderRadius: '12px' }} />
+                <input value={manNote} onChange={e => setManNote(e.target.value)} onKeyDown={e => e.key === 'Enter' && onAddManual()} placeholder="What happened?" style={{ ...input, flex: 1, fontSize: '13px', borderRadius: '12px' }} />
               </div>
-              <div onClick={onAddManual} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '12.5px', fontWeight: 700, padding: '10px', borderRadius: '10px', background: 'var(--ac-soft)', color: 'var(--ac)', border: '1px solid #d4e3f5', marginTop: '11px' }}>Add entry</div>
+              <div onClick={onAddManual} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '12.5px', fontWeight: 800, padding: '10px', borderRadius: '13px', background: ACCENT_SOFT, color: '#a06a2e', border: '2px solid #e8d7bd', marginTop: '11px' }}>Tuck it into the diary</div>
             </div>
           </div>
 
-          <div style={{ fontSize: '10.5px', letterSpacing: '.14em', textTransform: 'uppercase', color: '#8a97ab', fontWeight: 700, marginTop: '22px' }}>Recently logged · synced to Notion</div>
+          <div style={{ fontSize: '10.5px', letterSpacing: '.14em', textTransform: 'uppercase', color: '#a8927a', fontWeight: 800, marginTop: '22px' }}>The neighborhood log</div>
           <div style={{ display: 'flex', flexDirection: 'column', marginTop: '10px' }}>
             {feed.length === 0 && (
-              <div style={{ fontSize: '12.5px', color: '#8a97ab', padding: '10px 2px' }}>Nothing logged yet — sessions you capture above will show up here.</div>
+              <div style={{ fontSize: '12.5px', color: '#a8927a', padding: '10px 2px', fontWeight: 600 }}>Nothing logged yet — sessions you capture above will show up here.</div>
             )}
-            {feed.map((f, i) => (
-              <div key={f.id || i} style={{ display: 'flex', alignItems: 'center', gap: '13px', padding: '12px 2px', borderBottom: '1px solid #eef2f7', animation: 'db-in .3s ease both' }}>
-                <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--ac)', flex: '0 0 auto' }} />
-                {editingFeedId === f.id && f.id ? (
-                  <>
-                    <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <b style={{ fontSize: '13px', color: '#16233a', flex: '0 0 auto' }}>{f.project}</b>
-                      <input value={feedDraft.note} onChange={e => setFeedDraft(d => ({ ...d, note: e.target.value }))} onKeyDown={e => e.key === 'Enter' && saveFeedEdit(f.id)} placeholder="What happened?" style={{ ...input, flex: 1, fontSize: '12.5px', padding: '7px 10px' }} autoFocus />
-                      <input value={feedDraft.dur} onChange={e => setFeedDraft(d => ({ ...d, dur: e.target.value }))} onKeyDown={e => e.key === 'Enter' && saveFeedEdit(f.id)} placeholder="45m or 4h" style={{ ...input, width: '84px', fontSize: '12.5px', padding: '7px 10px' }} />
-                    </div>
-                    <div onClick={() => saveFeedEdit(f.id)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 700, color: '#fff', background: 'var(--ac)', padding: '6px 11px', borderRadius: '8px', flex: '0 0 auto' }}>Save</div>
-                    <div onClick={() => setEditingFeedId(null)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 600, color: '#8a97ab', padding: '6px 8px', border: '1px solid #e2e8f1', borderRadius: '8px', flex: '0 0 auto' }}>Cancel</div>
-                  </>
-                ) : (
-                  <>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: '13px', color: '#16233a' }}><b>{f.project}</b> · <span style={{ color: '#5a6b84' }}>{f.note}</span></div>
-                      <div style={{ fontSize: '11px', color: '#8a97ab', marginTop: '1px' }}>{f.when}</div>
-                    </div>
-                    <div style={{ fontSize: '12px', fontWeight: 600, color: '#5a6b84', whiteSpace: 'nowrap' }}>{f.dur}</div>
-                    {f.id && (
-                      <div onClick={() => startFeedEdit(f)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 600, color: '#8a97ab', padding: '5px 9px', border: '1px solid #e2e8f1', borderRadius: '8px', flex: '0 0 auto' }}>Edit</div>
-                    )}
-                  </>
-                )}
-              </div>
-            ))}
+            {feed.map((f, i) => {
+              const fp = projects.find(p => p.name === f.project);
+              const dot = fp ? colorsFor(fp.houseColor, fp.id).body : '#e0d2ba';
+              return (
+                <div key={f.id || i} style={{ display: 'flex', alignItems: 'center', gap: '13px', padding: '12px 2px', borderBottom: '2px dotted #eee1cd', animation: 'wf-in .3s ease both' }}>
+                  <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: dot, flex: '0 0 auto' }} />
+                  {editingFeedId === f.id && f.id ? (
+                    <>
+                      <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <b style={{ fontSize: '13px', color: INK, flex: '0 0 auto' }}>{f.project}</b>
+                        <input value={feedDraft.note} onChange={e => setFeedDraft(d => ({ ...d, note: e.target.value }))} onKeyDown={e => e.key === 'Enter' && saveFeedEdit(f.id)} placeholder="What happened?" style={{ ...input, flex: 1, fontSize: '12.5px', padding: '7px 11px' }} autoFocus />
+                        <input value={feedDraft.dur} onChange={e => setFeedDraft(d => ({ ...d, dur: e.target.value }))} onKeyDown={e => e.key === 'Enter' && saveFeedEdit(f.id)} placeholder="45m or 4h" style={{ ...input, width: '84px', fontSize: '12.5px', padding: '7px 11px' }} />
+                      </div>
+                      <div onClick={() => saveFeedEdit(f.id)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#fff', background: ACCENT, padding: '6px 12px', borderRadius: '10px', flex: '0 0 auto' }}>Save</div>
+                      <div onClick={() => setEditingFeedId(null)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '6px 9px', border: '2px solid #f0e2cf', borderRadius: '10px', flex: '0 0 auto' }}>Cancel</div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: '13px', color: INK, fontWeight: 600 }}><b>{f.project}</b> · <span style={{ color: INK_SOFT }}>{f.note}</span></div>
+                        <div style={{ fontSize: '11px', color: '#a8927a', marginTop: '1px', fontWeight: 600 }}>{f.when}</div>
+                      </div>
+                      <div style={{ fontSize: '12px', fontWeight: 800, color: INK_SOFT, whiteSpace: 'nowrap' }}>{f.dur}</div>
+                      {f.id && (
+                        <div onClick={() => startFeedEdit(f)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '5px 10px', border: '2px solid #f0e2cf', borderRadius: '10px', flex: '0 0 auto' }}>Edit</div>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
 

@@ -24,6 +24,7 @@ export interface Project {
   week: boolean[];
   hours: number;
   recoveryNote: string | null;
+  houseColor: string | null;
 }
 
 export interface CalendarEvent {
@@ -101,4 +102,10 @@ export interface FeedEntry {
 export interface Narrative {
   skyline: string | null;
   nudge: string | null;
+}
+
+export interface Summary {
+  streakDays: number;
+  hoursThisWeek: number;
+  visitsThisMonth: number;
 }

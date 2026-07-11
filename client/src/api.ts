@@ -1,4 +1,4 @@
-import type { CalendarEvent, FeedEntry, FieldUpdate, Narrative, PickerField, Project, TaskLite, WeeklyReview } from './types';
+import type { CalendarEvent, FeedEntry, FieldUpdate, Narrative, PickerField, Project, Summary, TaskLite, WeeklyReview } from './types';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -16,7 +16,7 @@ export const api = {
   projects: () => req<{ projects: Project[] }>('/projects').then(r => r.projects),
   createProject: (name: string, priority: number) =>
     req<{ id: string }>('/projects', { method: 'POST', body: JSON.stringify({ name, priority }) }),
-  updateProject: (id: string, fields: Partial<{ name: string; blurb: string; nextStep: string; status: string }>) =>
+  updateProject: (id: string, fields: Partial<{ name: string; blurb: string; nextStep: string; status: string; houseColor: string | null }>) =>
     req<{ ok: true }>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(fields) }),
   removeProject: (id: string) => req<{ ok: true }>(`/projects/${id}`, { method: 'DELETE' }),
   reorder: (order: string[], reason: string | null) =>
@@ -44,4 +44,5 @@ export const api = {
   narrative: () => req<Narrative>('/activity/narrative'),
 
   weeklyReview: () => req<WeeklyReview>('/review/weekly'),
+  summary: () => req<Summary>('/summary'),
 };
