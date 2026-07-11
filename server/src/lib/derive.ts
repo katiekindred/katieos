@@ -2,6 +2,14 @@ import type { ActivityLogEntry, Trend, WeeklyReview } from '../types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Local calendar date (YYYY-MM-DD) for day-bucketing, so streaks and per-day
+// counts follow the user's own midnight rather than UTC's — a session logged at
+// 11pm local counts as "today", not tomorrow.
+function localDayKey(t: number): string {
+  const d = new Date(t);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 // "2 weeks" / "10 days" / "6 weeks" -> days. Falls back to 14 (matches the
 // prototype's default per-project threshold) if the text can't be parsed.
 export function parseThresholdDays(threshold: string): number {
@@ -207,10 +215,10 @@ export function computeSummary(log: ActivityLogEntry[], now: number = Date.now()
   const hoursThisWeek = hoursIn(log, thisFrom, end);
 
   const touchedDays = new Set<string>();
-  for (const e of log) touchedDays.add(new Date(e.createdAt).toISOString().slice(0, 10));
+  for (const e of log) touchedDays.add(localDayKey(new Date(e.createdAt).getTime()));
   let streakDays = 0;
   for (let i = 0; i < 60; i++) {
-    const key = new Date(now - i * DAY_MS).toISOString().slice(0, 10);
+    const key = localDayKey(now - i * DAY_MS);
     if (touchedDays.has(key)) streakDays++;
     else break;
   }
@@ -250,7 +258,7 @@ export function computeWeeklyReview(
   const dayHours = new Map<string, number>();
   for (const e of thisWeek) {
     const d = new Date(e.createdAt);
-    const key = d.toISOString().slice(0, 10);
+    const key = localDayKey(d.getTime());
     dayHours.set(key, (dayHours.get(key) || 0) + (e.durationSec || 0) / 3600);
   }
   let busiestDay: WeeklyReview['busiestDay'] = null;
@@ -262,10 +270,10 @@ export function computeWeeklyReview(
 
   // Longest run of consecutive days (ending today) with any logged session.
   const touchedDays = new Set([...dayHours.keys()]);
-  for (const e of log) touchedDays.add(new Date(e.createdAt).toISOString().slice(0, 10));
+  for (const e of log) touchedDays.add(localDayKey(new Date(e.createdAt).getTime()));
   let longestStreakDays = 0;
   for (let i = 0; i < 60; i++) {
-    const key = new Date(now - i * DAY_MS).toISOString().slice(0, 10);
+    const key = localDayKey(now - i * DAY_MS);
     if (touchedDays.has(key)) longestStreakDays++;
     else break;
   }

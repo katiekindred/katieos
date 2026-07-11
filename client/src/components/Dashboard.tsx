@@ -159,8 +159,11 @@ export default function Dashboard() {
   const [manFields, setManFields] = useState<Fields>(BLANK_FIELDS);
   const [manOrig, setManOrig] = useState<Fields>(BLANK_FIELDS);
 
+  const confettiTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   function celebrate() {
     setConfettiBurst(Date.now());
+    if (confettiTimer.current) clearTimeout(confettiTimer.current);
+    confettiTimer.current = setTimeout(() => setConfettiBurst(0), 4200);
   }
 
   const tasksFor = (projectId: string | null) =>
@@ -298,9 +301,9 @@ export default function Dashboard() {
   async function saveEdit(id: string) {
     if (!draft) return;
     setEditingId(null);
-    setProjects(ps => ps.map(p => p.id === id ? { ...p, name: draft.name, blurb: draft.blurb, nextStep: draft.nextStep, houseColor: draft.houseColor } : p));
+    setProjects(ps => ps.map(p => p.id === id ? { ...p, name: draft.name, blurb: draft.blurb, threshold: draft.threshold, nextStep: draft.nextStep, houseColor: draft.houseColor } : p));
     try {
-      await api.updateProject(id, { name: draft.name, blurb: draft.blurb, nextStep: draft.nextStep, houseColor: draft.houseColor });
+      await api.updateProject(id, { name: draft.name, blurb: draft.blurb, nextStep: draft.nextStep, threshold: draft.threshold, houseColor: draft.houseColor });
       setSaveError(null);
     } catch (e: any) {
       setSaveError(`Couldn't save project changes to Notion: ${e.message}`);
@@ -617,8 +620,10 @@ export default function Dashboard() {
                                 const raw = e.target.value;
                                 setDraft(d => {
                                   if (!d) return d;
-                                  const norm = raw.startsWith('#') ? raw : `#${raw}`;
-                                  return { ...d, colorHexInput: raw, houseColor: HEX_RE.test(norm) ? norm.toLowerCase() : d.houseColor };
+                                  const trimmed = raw.trim();
+                                  const norm = trimmed.startsWith('#') ? trimmed : `#${trimmed}`;
+                                  const houseColor = trimmed === '' ? null : (HEX_RE.test(norm) ? norm.toLowerCase() : d.houseColor);
+                                  return { ...d, colorHexInput: raw, houseColor };
                                 });
                               }}
                               onKeyDown={e => e.key === 'Enter' && saveEdit(p.id)}
