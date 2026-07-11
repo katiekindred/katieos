@@ -149,11 +149,10 @@ export default function Skyline({ projects, onRequestReorder, truthOverride }: S
     transform: weatherOn ? 'translateX(21px)' : 'translateX(0)', transition: 'transform .3s ease',
   };
 
-  const names: Record<Flavor, string> = { day: 'day', dusk: 'dusk', night: 'night' };
   const timeStr = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const variantName = isAuto
-    ? `population: your projects · ${names[flavor]} mode, ${timeStr}`
-    : `population: your projects · pretending it’s ${names[flavor]}`;
+    ? `population: your projects · ${flavor} mode, ${timeStr}`
+    : `population: your projects · pretending it’s ${flavor}`;
 
   const modes: { key: 'auto' | Flavor; label: string }[] = [
     { key: 'auto', label: 'Auto' }, { key: 'day', label: 'Day' }, { key: 'dusk', label: 'Dusk' }, { key: 'night', label: 'Night' },

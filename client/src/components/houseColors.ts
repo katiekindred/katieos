@@ -57,7 +57,7 @@ function hslToRgb(h: number, s: number, l: number) {
   return { r: r * 255, g: g * 255, b: b * 255 };
 }
 
-const HEX_RE = /^#?[0-9a-fA-F]{6}$/;
+export const HEX_RE = /^#?[0-9a-fA-F]{6}$/;
 
 // Derives shade/door tones from any body hex, for custom colors that aren't
 // one of the stock swatches (which keep their hand-picked shades).

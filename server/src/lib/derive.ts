@@ -206,6 +206,19 @@ function hoursIn(entries: ActivityLogEntry[], from: number, to: number): number 
 
 export interface Summary { streakDays: number; hoursThisWeek: number; visitsThisMonth: number }
 
+// Longest run of consecutive local days ending today (i=0) with any logged
+// session. Shared by the stickers streak and the weekly reflection.
+export function computeStreakDays(log: ActivityLogEntry[], now: number): number {
+  const touched = new Set<string>();
+  for (const e of log) touched.add(localDayKey(new Date(e.createdAt).getTime()));
+  let streak = 0;
+  for (let i = 0; i < 60; i++) {
+    if (touched.has(localDayKey(now - i * DAY_MS))) streak++;
+    else break;
+  }
+  return streak;
+}
+
 // Stickers-row stats: the longest run of consecutive days (ending today) with
 // any logged session, total hours in the last 7 days, and how many sessions
 // were logged in the last 30 days — across every project.
@@ -214,14 +227,7 @@ export function computeSummary(log: ActivityLogEntry[], now: number = Date.now()
   const end = now + 1;
   const hoursThisWeek = hoursIn(log, thisFrom, end);
 
-  const touchedDays = new Set<string>();
-  for (const e of log) touchedDays.add(localDayKey(new Date(e.createdAt).getTime()));
-  let streakDays = 0;
-  for (let i = 0; i < 60; i++) {
-    const key = localDayKey(now - i * DAY_MS);
-    if (touchedDays.has(key)) streakDays++;
-    else break;
-  }
+  const streakDays = computeStreakDays(log, now);
 
   const monthFrom = now - 30 * DAY_MS;
   const visitsThisMonth = log.filter(e => new Date(e.createdAt).getTime() >= monthFrom && new Date(e.createdAt).getTime() < end).length;
@@ -268,15 +274,7 @@ export function computeWeeklyReview(
     }
   }
 
-  // Longest run of consecutive days (ending today) with any logged session.
-  const touchedDays = new Set([...dayHours.keys()]);
-  for (const e of log) touchedDays.add(localDayKey(new Date(e.createdAt).getTime()));
-  let longestStreakDays = 0;
-  for (let i = 0; i < 60; i++) {
-    const key = localDayKey(now - i * DAY_MS);
-    if (touchedDays.has(key)) longestStreakDays++;
-    else break;
-  }
+  const longestStreakDays = computeStreakDays(log, now);
 
   const rising = byProject.filter(p => p.hoursThisWeek > 0 && p.delta > 0).sort((a, b) => b.delta - a.delta).map(p => p.name);
   const fading = byProject.filter(p => p.hoursLastWeek > 0 && p.delta < 0).sort((a, b) => a.delta - b.delta).map(p => p.name);

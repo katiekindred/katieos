@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from 're
 import { api } from '../api';
 import type { CalendarEvent, FeedEntry, FieldUpdate, Narrative, PickerField, Project, Summary, TaskLite, WeeklyReview } from '../types';
 import Confetti from './Confetti';
-import { HOUSE_COLORS, colorsFor } from './houseColors';
+import { HEX_RE, HOUSE_COLORS, colorsFor } from './houseColors';
 import NotionFieldDropdown from './NotionFieldDropdown';
 import Skyline from './Skyline';
 import { TREND_COLORS, trendWord } from './village';
@@ -43,8 +43,6 @@ function fmtDur(sec: number): string {
   if (m < 60) return `${m}m`;
   return m % 60 === 0 ? `${m / 60}h` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
-
-const HEX_RE = /^#?[0-9a-fA-F]{6}$/;
 
 const input: CSSProperties = {
   width: '100%', fontFamily: 'inherit', fontSize: '12.5px', color: INK,
