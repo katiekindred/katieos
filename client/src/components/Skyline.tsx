@@ -38,7 +38,7 @@ function Grid({ sessions, h, winOnGlow }: { sessions: number; h: number; winOnGl
   }
   return (
     <div style={{
-      display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '6px',
+      position: 'relative', display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '6px',
       padding: '16px 13px 44px', height: '100%', boxSizing: 'border-box', alignContent: 'end',
     }}>{cells}</div>
   );
