@@ -258,9 +258,11 @@ export default function Skyline({ projects, onRequestReorder, truthOverride }: S
         )}
       </div>
 
+
+
       <div style={{ position: 'relative', zIndex: 6, padding: '18px 30px 24px', borderTop: '2px solid var(--stroke)', background: 'var(--card)', backdropFilter: 'blur(8px)' }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px', justifyContent: 'space-between', flexWrap: 'wrap' }}>
-          <div style={{ maxWidth: '640px', fontFamily: "'Fraunces', Georgia, serif", fontWeight: 600, fontSize: '19px', lineHeight: 1.4, color: 'var(--ink)', textWrap: 'pretty' as CSSProperties['textWrap'] }}>
+          <div style={{ maxWidth: '640px', fontFamily: "'Fraunces', Georgia, serif", fontWeight: 400, fontSize: '19px', lineHeight: 1.4, color: 'var(--ink)', textWrap: 'pretty' as CSSProperties['textWrap'] }}>
             {storyLine}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '10.5px', color: 'var(--ink-soft)', whiteSpace: 'nowrap', fontWeight: 700 }}>
@@ -273,3 +275,4 @@ export default function Skyline({ projects, onRequestReorder, truthOverride }: S
     </div>
   );
 }
+// above (like line 236) is the text below the skyline that explains what the skyline is showing, and the legend for the symbols.
