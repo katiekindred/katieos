@@ -36,6 +36,8 @@ for the template):
 | `NOTION_TOKEN` | Internal integration token ("KatieOS" integration) |
 | `NOTION_PROJECTS_DB` | Database ID of the TIGFBAO projects board |
 | `NOTION_TASKS_DB` | Database ID of the Master Task List Table |
+| `NOTION_SKYLINE_PAGE` / `NOTION_NUDGE_PAGE` | Optional pages for Claude-written copy (see below) |
+| `NOTION_ENERGY_PAGE` | Optional page for one-tap energy check-ins (see below) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | OAuth client from Google Cloud Console |
 | `GOOGLE_REDIRECT_URI` | `http://localhost:4000/api/auth/google/callback` |
 
@@ -55,19 +57,34 @@ for the template):
 ## Claude-written copy (optional)
 
 The skyline's one-line header and the "gentle nudge" can be written by a
-scheduled Claude task instead of the app's built-in templates. Create a
-Notion page containing two lines:
+scheduled Claude task instead of the app's built-in templates. Create two
+Notion pages — one for the skyline line, one for the nudge body — share each
+with the KatieOS integration, and put their IDs in `NOTION_SKYLINE_PAGE` and
+`NOTION_NUDGE_PAGE` in `server/.env`. Each page's body text is read
+**verbatim** (no labels or prefixes; lines starting with `<!--` are treated
+as guidance comments and skipped) and shown in place of the app's built-in
+copy, refreshed every few minutes. A recurring Claude task can then rewrite
+either page on a schedule using your recent Notion activity — no code edits
+involved.
 
-```
-Skyline: <one sentence for under the skyline>
-Nudge: <the gentle nudge body>
-```
+## Energy early-warning layer (optional)
 
-Share the page with the KatieOS integration, put its ID in
-`NOTION_NARRATIVE_PAGE` in `server/.env`, and the dashboard will prefer that
-copy whenever those lines exist (refreshed every few minutes). A recurring
-Claude task can then rewrite the page on a schedule using your recent
-Notion activity — no code edits involved.
+The dashboard can notice a slide from Yellow toward Orange before it hits
+Red. A one-tap check-in strip (Green / Yellow / Orange / Red, optional note,
+always skippable, asked at most once per 4 hours) appends lines to a Notion
+page — create one, share it with the KatieOS integration, and set
+`NOTION_ENERGY_PAGE`. Alongside the check-ins, the server infers an energy
+forecast from behavior the app already tracks: session cadence vs last week,
+buildings going dark, broken streaks, calendar density, and silence on both
+channels at once. The forecast is a weather word (`clear` / `clouding` /
+`storm`) plus plain-language reasons, surfaced as gentle skyline weather
+(overcast, then a cozy drizzle with warmer window light) and, when cloudy or
+stormy, an evidence-first nudge. A recent explicit check-in always outranks
+inference: Orange or Red within a day forces a storm, Green caps it at
+clouding. Endpoints: `POST /api/energy` (`{ level, note? }`),
+`GET /api/energy?days=30`, `GET /api/energy/forecast`. Everything degrades
+gracefully — no energy page means the strip hides and inference runs on
+behavioral signals alone; no calendar auth just silences that signal.
 
 ## How it behaves
 

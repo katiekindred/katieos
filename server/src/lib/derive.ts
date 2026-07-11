@@ -2,6 +2,37 @@ import type { ActivityLogEntry, Trend, WeeklyReview } from '../types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Streak/visit stats are reckoned against the local (Central) calendar, not UTC,
+// so a session logged at 11pm counts toward that local day rather than tomorrow.
+export const CENTRAL_TZ = 'America/Chicago';
+function centralParts(ts: number): { y: string; m: string; d: string } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: CENTRAL_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date(ts));
+  const get = (t: string) => parts.find(p => p.type === t)!.value;
+  return { y: get('year'), m: get('month'), d: get('day') };
+}
+const centralDayKey = (ts: number) => { const { y, m, d } = centralParts(ts); return `${y}-${m}-${d}`; };
+const centralMonthKey = (ts: number) => { const { y, m } = centralParts(ts); return `${y}-${m}`; };
+
+// Whole Central calendar days between `iso`'s local date and today's: 0 if it's
+// the same Central day, 1 if yesterday, etc. Comparing pure UTC-midnight anchors
+// of each local date keeps the difference DST-proof. Lets "today"/"yesterday"
+// labels flip at Central midnight, matching the streak/visit stats.
+export function centralDaysAgo(iso: string, now: number = Date.now()): number {
+  const then = centralParts(new Date(iso).getTime());
+  const today = centralParts(now);
+  const thenUTC = Date.UTC(Number(then.y), Number(then.m) - 1, Number(then.d));
+  const todayUTC = Date.UTC(Number(today.y), Number(today.m) - 1, Number(today.d));
+  return Math.round((todayUTC - thenUTC) / DAY_MS);
+}
+// Central weekday as a Monday-first index: Mon=0 … Sun=6.
+const WEEKDAYS_MON0 = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function centralWeekdayIndex(ts: number): number {
+  const wd = new Intl.DateTimeFormat('en-US', { timeZone: CENTRAL_TZ, weekday: 'short' }).format(new Date(ts));
+  return WEEKDAYS_MON0.indexOf(wd);
+}
+
 // "2 weeks" / "10 days" / "6 weeks" -> days. Falls back to 14 (matches the
 // prototype's default per-project threshold) if the text can't be parsed.
 export function parseThresholdDays(threshold: string): number {
@@ -181,6 +212,42 @@ export function parseSessionLine(raw: string): SessionLine | null {
   return { createdAt: when.toISOString(), durationSec, note, source };
 }
 
+// ---- Energy check-in lines --------------------------------------------------
+// A one-tap energy check-in lives as one appended line on its own Notion page
+// (NOTION_ENERGY_PAGE), mirroring the session-line pattern above so scheduled
+// Claude tasks can read the same page later. Same marker, " · "-separated:
+//
+//   ▸ 2026-07-11T15:04:00.000Z · Yellow · long week, slept ok
+//
+// Levels are exactly Katie's four states — no numeric scale, no extras.
+
+export type EnergyLevel = 'Green' | 'Yellow' | 'Orange' | 'Red';
+export const ENERGY_LEVELS: readonly EnergyLevel[] = ['Green', 'Yellow', 'Orange', 'Red'];
+// Rank for slide detection: higher = lower energy.
+const ENERGY_RANK: Record<EnergyLevel, number> = { Green: 0, Yellow: 1, Orange: 2, Red: 3 };
+
+export interface EnergyLine { createdAt: string; level: EnergyLevel; note: string }
+
+export function formatEnergyLine(e: EnergyLine): string {
+  const note = (e.note || '').replace(/ · /g, ' - ').trim() || '—';
+  return `${SESSION_MARKER} ${new Date(e.createdAt).toISOString()}${FIELD_SEP}${e.level}${FIELD_SEP}${note}`;
+}
+
+// Null for anything that doesn't start with the marker, has a bad timestamp,
+// or names an unknown level. The empty-note placeholder `—` parses back to ''.
+export function parseEnergyLine(raw: string): EnergyLine | null {
+  const line = (raw || '').trim();
+  if (!line.startsWith(SESSION_MARKER)) return null;
+  const parts = line.slice(SESSION_MARKER.length).trim().split(FIELD_SEP);
+  if (parts.length < 2) return null;
+  const when = new Date(parts[0].trim());
+  if (isNaN(when.getTime())) return null;
+  const level = parts[1].trim() as EnergyLevel;
+  if (!ENERGY_LEVELS.includes(level)) return null;
+  const note = parts.slice(2).join(FIELD_SEP).trim();
+  return { createdAt: when.toISOString(), level, note: note === '—' ? '' : note };
+}
+
 // ---- Weekly reflection ------------------------------------------------------
 // Pure derivation over the activity log: this week vs. the week before, who
 // rose, who faded, who went dark, plus a couple of momentum stats. Read-only —
@@ -188,35 +255,58 @@ export function parseSessionLine(raw: string): SessionLine | null {
 
 interface ReviewProjectInput { id: string; name: string; quiet: boolean }
 
-function hoursIn(entries: ActivityLogEntry[], from: number, to: number): number {
-  const secs = entries.reduce((sum, e) => {
-    const t = new Date(e.createdAt).getTime();
-    return t >= from && t < to ? sum + (e.durationSec || 0) : sum;
-  }, 0);
+// Sum, in hours, the sessions whose Central date falls on one of `days`.
+function hoursOnDays(entries: ActivityLogEntry[], days: Set<string>): number {
+  const secs = entries.reduce((sum, e) =>
+    days.has(centralDayKey(new Date(e.createdAt).getTime())) ? sum + (e.durationSec || 0) : sum, 0);
   return Math.round((secs / 3600) * 10) / 10;
+}
+
+// The two Central calendar weeks that "this week vs last week" compares against.
+// Weeks start Monday; the current week runs Monday-through-today (week-to-date),
+// and last week is the SAME-LENGTH slice — last Monday through last week's same
+// weekday as today — so a partial week is always compared against an equal span.
+// anchorNoon is noon UTC of today's Central date, a DST-safe pivot for stepping
+// back whole days.
+function centralWeekWindows(now: number): {
+  anchorNoon: number; daysSinceMonday: number; thisWeekDays: Set<string>; lastWeekDays: Set<string>;
+} {
+  const today = centralParts(now);
+  const anchorNoon = Date.UTC(Number(today.y), Number(today.m) - 1, Number(today.d), 12);
+  const daysSinceMonday = centralWeekdayIndex(now);
+  const thisWeekDays = new Set<string>();
+  for (let i = 0; i <= daysSinceMonday; i++) thisWeekDays.add(centralDayKey(anchorNoon - i * DAY_MS));
+  // Shift the same window back exactly 7 days: i=7 is last week's same weekday as
+  // today, i=daysSinceMonday+7 is last Monday.
+  const lastWeekDays = new Set<string>();
+  for (let i = 7; i <= daysSinceMonday + 7; i++) lastWeekDays.add(centralDayKey(anchorNoon - i * DAY_MS));
+  return { anchorNoon, daysSinceMonday, thisWeekDays, lastWeekDays };
 }
 
 export interface Summary { streakDays: number; hoursThisWeek: number; visitsThisMonth: number }
 
 // Stickers-row stats: the longest run of consecutive days (ending today) with
-// any logged session, total hours in the last 7 days, and how many sessions
-// were logged in the last 30 days — across every project.
+// any logged session, hours logged so far this week (Central, weeks start
+// Monday), and how many sessions were logged this calendar month — across every
+// project. All three are reckoned against the Central calendar, not UTC.
 export function computeSummary(log: ActivityLogEntry[], now: number = Date.now()): Summary {
-  const thisFrom = now - 7 * DAY_MS;
-  const end = now + 1;
-  const hoursThisWeek = hoursIn(log, thisFrom, end);
+  const { anchorNoon, thisWeekDays } = centralWeekWindows(now);
 
   const touchedDays = new Set<string>();
-  for (const e of log) touchedDays.add(new Date(e.createdAt).toISOString().slice(0, 10));
+  for (const e of log) touchedDays.add(centralDayKey(new Date(e.createdAt).getTime()));
+
   let streakDays = 0;
   for (let i = 0; i < 60; i++) {
-    const key = new Date(now - i * DAY_MS).toISOString().slice(0, 10);
+    const key = centralDayKey(anchorNoon - i * DAY_MS);
     if (touchedDays.has(key)) streakDays++;
     else break;
   }
 
-  const monthFrom = now - 30 * DAY_MS;
-  const visitsThisMonth = log.filter(e => new Date(e.createdAt).getTime() >= monthFrom && new Date(e.createdAt).getTime() < end).length;
+  // Week-to-date: sum sessions whose Central date falls on Monday-through-today.
+  const hoursThisWeek = hoursOnDays(log, thisWeekDays);
+
+  const currentMonth = centralMonthKey(now);
+  const visitsThisMonth = log.filter(e => centralMonthKey(new Date(e.createdAt).getTime()) === currentMonth).length;
 
   return { streakDays, hoursThisWeek, visitsThisMonth };
 }
@@ -226,46 +316,44 @@ export function computeWeeklyReview(
   projects: ReviewProjectInput[],
   now: number = Date.now(),
 ): WeeklyReview {
-  const thisFrom = now - 7 * DAY_MS;
-  const priorFrom = now - 14 * DAY_MS;
-  const end = now + 1; // inclusive of a session logged at this instant
+  // Central calendar weeks (Monday-start): this week is Monday-to-today; last
+  // week is the same-length week-to-date slice of the prior week, so the two are
+  // always compared over an equal number of days.
+  const { anchorNoon, thisWeekDays, lastWeekDays } = centralWeekWindows(now);
   const nameById = new Map(projects.map(p => [p.id, p.name]));
 
   const byProject = projects.map(p => {
     const entries = log.filter(e => e.projectId === p.id);
-    const hoursThisWeek = hoursIn(entries, thisFrom, end);
-    const hoursLastWeek = hoursIn(entries, priorFrom, thisFrom);
+    const hoursThisWeek = hoursOnDays(entries, thisWeekDays);
+    const hoursLastWeek = hoursOnDays(entries, lastWeekDays);
     const delta = Math.round((hoursThisWeek - hoursLastWeek) * 10) / 10;
     const trend: Trend = hoursThisWeek > hoursLastWeek ? 'rising'
       : hoursThisWeek < hoursLastWeek ? 'fading' : 'steady';
     return { projectId: p.id, name: p.name, hoursThisWeek, hoursLastWeek, delta, trend };
   });
 
-  const thisWeek = log.filter(e => {
-    const t = new Date(e.createdAt).getTime();
-    return t >= thisFrom && t < end;
-  });
+  const thisWeek = log.filter(e => thisWeekDays.has(centralDayKey(new Date(e.createdAt).getTime())));
+  const lastWeek = log.filter(e => lastWeekDays.has(centralDayKey(new Date(e.createdAt).getTime())));
 
-  // Busiest calendar day in the window.
+  // Busiest Central day this week.
   const dayHours = new Map<string, number>();
   for (const e of thisWeek) {
-    const d = new Date(e.createdAt);
-    const key = d.toISOString().slice(0, 10);
+    const key = centralDayKey(new Date(e.createdAt).getTime());
     dayHours.set(key, (dayHours.get(key) || 0) + (e.durationSec || 0) / 3600);
   }
   let busiestDay: WeeklyReview['busiestDay'] = null;
   for (const [key, hrs] of dayHours) {
     if (!busiestDay || hrs > busiestDay.hours) {
-      busiestDay = { label: new Date(key + 'T12:00:00').toLocaleDateString([], { weekday: 'long' }), hours: Math.round(hrs * 10) / 10 };
+      busiestDay = { label: new Date(key + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' }), hours: Math.round(hrs * 10) / 10 };
     }
   }
 
-  // Longest run of consecutive days (ending today) with any logged session.
-  const touchedDays = new Set([...dayHours.keys()]);
-  for (const e of log) touchedDays.add(new Date(e.createdAt).toISOString().slice(0, 10));
+  // Longest run of consecutive Central days (ending today) with any logged session.
+  const touchedDays = new Set<string>();
+  for (const e of log) touchedDays.add(centralDayKey(new Date(e.createdAt).getTime()));
   let longestStreakDays = 0;
   for (let i = 0; i < 60; i++) {
-    const key = new Date(now - i * DAY_MS).toISOString().slice(0, 10);
+    const key = centralDayKey(anchorNoon - i * DAY_MS);
     if (touchedDays.has(key)) longestStreakDays++;
     else break;
   }
@@ -277,9 +365,10 @@ export function computeWeeklyReview(
     .map(p => nameById.get(p.id) || p.name);
 
   return {
-    totalHoursThisWeek: hoursIn(log, thisFrom, end),
-    totalHoursLastWeek: hoursIn(log, priorFrom, thisFrom),
+    totalHoursThisWeek: hoursOnDays(log, thisWeekDays),
+    totalHoursLastWeek: hoursOnDays(log, lastWeekDays),
     sessionsThisWeek: thisWeek.length,
+    sessionsLastWeek: lastWeek.length,
     activeProjectsThisWeek: byProject.filter(p => p.hoursThisWeek > 0).length,
     longestStreakDays,
     busiestDay,
@@ -288,4 +377,143 @@ export function computeWeeklyReview(
     fading,
     wentDark,
   };
+}
+
+// ---- Energy forecast --------------------------------------------------------
+// The early-warning layer: read the signals the app already tracks (session
+// cadence, quiet buildings, streaks, calendar density, self-reported check-ins)
+// and turn them into skyline weather. Simple explainable rules, no ML — every
+// fired signal contributes one plain-language reason, so a warning can always
+// name its evidence.
+
+export type Weather = 'clear' | 'clouding' | 'storm';
+export interface EnergyForecast { weather: Weather; reasons: string[] }
+
+// 10+ events in the coming week reads as a heavy calendar. Tuned by feel, not
+// data — if it proves noisy in practice, change it here (and only here).
+export const HEAVY_CALENDAR_EVENTS = 10;
+
+// "Recent" for check-ins is today-or-yesterday on the Central calendar (the
+// spec's "within 24h", bucketed the same way as every other stat in this app).
+const RECENT_CHECKIN_DAYS = 1;
+// A check-in is stale after this many Central days without one ("hygiene slips
+// first" — silence on both channels is itself a signal).
+const CHECKIN_SILENCE_DAYS = 5;
+
+const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'}`;
+
+// The most recent run of consecutive Central days with a session that ended
+// 1–7 days ago: its length and how many days ago it ended. Null if the last
+// touched day is today (streak alive) or more than a week back.
+function recentEndedStreak(log: ActivityLogEntry[], anchorNoon: number): { length: number; endedDaysAgo: number } | null {
+  const touched = new Set<string>();
+  for (const e of log) touched.add(centralDayKey(new Date(e.createdAt).getTime()));
+  if (touched.has(centralDayKey(anchorNoon))) return null; // still going — not "ended"
+  for (let gap = 1; gap <= 7; gap++) {
+    if (!touched.has(centralDayKey(anchorNoon - gap * DAY_MS))) continue;
+    let length = 0;
+    for (let i = gap; i < gap + 60; i++) {
+      if (touched.has(centralDayKey(anchorNoon - i * DAY_MS))) length++;
+      else break;
+    }
+    return { length, endedDaysAgo: gap };
+  }
+  return null;
+}
+
+// Inputs deviate from the original sketch in three deliberate ways:
+// `activityLog` is passed so the streak-break signal can see which days were
+// touched (Summary alone can't say a 5+ day streak just ended);
+// `calendarEventCountNext7d` is nullable so an unconfigured/unauthorized
+// calendar contributes nothing rather than reading as an empty week; and
+// `checkinEnabled` lets the double-silence signal stand down when
+// NOTION_ENERGY_PAGE isn't set (no check-ins ever ≠ five days of silence).
+export function computeEnergyForecast(inputs: {
+  energyLog: EnergyLine[];                  // newest first
+  review: WeeklyReview;
+  summary: Summary;
+  activityLog: ActivityLogEntry[];
+  quietProjectCount: number;
+  visibleProjectCount: number;
+  calendarEventCountNext7d: number | null;  // null = calendar unavailable
+  checkinEnabled?: boolean;                 // default true
+  now?: Date;
+}): EnergyForecast {
+  const { energyLog, review, summary, activityLog, quietProjectCount, visibleProjectCount } = inputs;
+  const checkinEnabled = inputs.checkinEnabled !== false;
+  const nowMs = (inputs.now ?? new Date()).getTime();
+  const today = centralParts(nowMs);
+  const anchorNoon = Date.UTC(Number(today.y), Number(today.m) - 1, Number(today.d), 12);
+
+  const reasons: string[] = [];
+
+  // Cadence drop: this week's sessions fell to less than half of last week's
+  // (equal week-to-date slices, so a Tuesday is compared against last Tuesday).
+  if (review.sessionsLastWeek > 0 && review.sessionsThisWeek < review.sessionsLastWeek / 2) {
+    const thisPart = review.sessionsThisWeek === 0 ? 'no sessions this week' : `${plural(review.sessionsThisWeek, 'session')} this week`;
+    reasons.push(`${thisPart}, down from ${review.sessionsLastWeek} last week`);
+  }
+
+  // Darkening skyline: several houses went dark this week, or most of the
+  // visible street is quiet.
+  if (review.wentDark.length >= 2) {
+    reasons.push(`${review.wentDark.length} buildings went dark this week`);
+  } else if (visibleProjectCount > 0 && quietProjectCount > visibleProjectCount / 2) {
+    reasons.push(`${quietProjectCount} of ${visibleProjectCount} buildings quiet`);
+  }
+
+  // Streak break: a 5+ day streak ended within the last 7 days and nothing has
+  // been logged today.
+  if (summary.streakDays === 0) {
+    const ended = recentEndedStreak(activityLog, anchorNoon);
+    if (ended && ended.length >= 5) {
+      reasons.push(`a ${ended.length}-day streak ended ${plural(ended.endedDaysAgo, 'day')} ago`);
+    }
+  }
+
+  // Heavy calendar: only when the calendar is actually readable.
+  if (inputs.calendarEventCountNext7d != null && inputs.calendarEventCountNext7d >= HEAVY_CALENDAR_EVENTS) {
+    reasons.push(`${inputs.calendarEventCountNext7d} calendar events in the next 7 days`);
+  }
+
+  // Self-reported slide: the two most recent check-ins within 7 days are
+  // strictly worsening, or the latest of them is already Orange or Red.
+  const within7 = energyLog.filter(e => centralDaysAgo(e.createdAt, nowMs) <= 7);
+  if (within7.length >= 2 && ENERGY_RANK[within7[0].level] > ENERGY_RANK[within7[1].level]) {
+    reasons.push(`check-ins sliding, ${within7[1].level} to ${within7[0].level}`);
+  } else if (within7.length >= 1 && (within7[0].level === 'Orange' || within7[0].level === 'Red')) {
+    reasons.push(`latest check-in is ${within7[0].level}`);
+  }
+
+  // Double silence: no check-in in 5+ days AND no sessions this week — the
+  // "hygiene slips first" tell. Weak on its own (one signal = clouding at most).
+  if (checkinEnabled && review.sessionsThisWeek === 0) {
+    const lastCheckinDaysAgo = energyLog.length ? centralDaysAgo(energyLog[0].createdAt, nowMs) : null;
+    if (lastCheckinDaysAgo == null) {
+      reasons.push('no check-ins yet and no sessions this week');
+    } else if (lastCheckinDaysAgo >= CHECKIN_SILENCE_DAYS) {
+      reasons.push(`no check-in in ${plural(lastCheckinDaysAgo, 'day')} and no sessions this week`);
+    }
+  }
+
+  // Weather. A recent explicit check-in is ground truth: Orange/Red forces
+  // storm; Green caps at clouding no matter how many behavioral signals fire.
+  const latest = energyLog[0];
+  const latestRecent = latest && centralDaysAgo(latest.createdAt, nowMs) <= RECENT_CHECKIN_DAYS ? latest : null;
+
+  let weather: Weather;
+  if ((latestRecent && (latestRecent.level === 'Orange' || latestRecent.level === 'Red')) || reasons.length >= 3) {
+    weather = 'storm';
+  } else if (reasons.length >= 1) {
+    weather = 'clouding';
+  } else {
+    weather = 'clear';
+  }
+
+  if (weather === 'storm' && latestRecent?.level === 'Green') {
+    weather = 'clouding';
+    reasons.unshift('you said Green recently, so treating this as clouds, not a storm');
+  }
+
+  return { weather, reasons };
 }

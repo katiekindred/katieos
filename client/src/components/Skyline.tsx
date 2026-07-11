@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
-import type { Project, Trend } from '../types';
+import type { Project, Trend, Weather } from '../types';
 import { colorsFor, type HouseShades } from './houseColors';
 import { flavorForTime, themeFor, type Flavor } from './skylineTheme';
-import { SkylineAmbience } from './SkylineAmbience';
+import { EnergyWeatherOverlay, SkylineAmbience } from './SkylineAmbience';
 import { trendWord } from './village';
 
 interface SkylineProps {
   projects: Project[];
   onRequestReorder?: () => void;
   truthOverride?: string | null;
+  // Energy forecast weather. Clear leaves today's skyline untouched; clouding
+  // and storm layer gentle overcast/drizzle over the time-of-day ambience.
+  energyWeather?: Weather;
 }
 
 interface Building {
@@ -78,7 +81,7 @@ function HouseWeather({ quiet, rising }: { quiet: boolean; rising: boolean }) {
 
 const cssVars = (vars: Record<string, string>) => vars as CSSProperties;
 
-export default function Skyline({ projects, onRequestReorder, truthOverride }: SkylineProps) {
+export default function Skyline({ projects, onRequestReorder, truthOverride, energyWeather = 'clear' }: SkylineProps) {
   const [weatherOn, setWeatherOn] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checkin, setCheckin] = useState<string | null>(null);
@@ -94,8 +97,16 @@ export default function Skyline({ projects, onRequestReorder, truthOverride }: S
   const isAuto = !override;
   const tv = themeFor(flavor);
 
+  // In a storm the village hunkers down cozy: window light warms up (and lit
+  // windows glow even in day mode) while the drizzle falls outside.
+  const storm = energyWeather === 'storm';
+  const themeVars = storm
+    ? { ...tv.vars, '--win-on': '#ffc76f', '--glow': 'rgba(255,183,92,0.7)' }
+    : tv.vars;
+  const winOnGlow = tv.winOnGlow || storm;
+
   const rootStyle: CSSProperties = {
-    ...cssVars(tv.vars),
+    ...cssVars(themeVars),
     position: 'relative', width: '100%', height: '100%', minHeight: '780px', overflow: 'hidden',
     borderRadius: '26px', background: 'var(--sky)', color: 'var(--ink)',
     fontFamily: "'Nunito', system-ui, sans-serif",
@@ -163,6 +174,7 @@ export default function Skyline({ projects, onRequestReorder, truthOverride }: S
     <div style={rootStyle}>
       <div style={{ position: 'absolute', inset: 0, zIndex: 0, pointerEvents: 'none', overflow: 'hidden', borderRadius: '26px' }}>
         <SkylineAmbience flavor={flavor} />
+        <EnergyWeatherOverlay weather={energyWeather} flavor={flavor} />
       </div>
 
       <div style={{ position: 'relative', zIndex: 6, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '26px 30px 0', gap: '18px' }}>
@@ -205,7 +217,7 @@ export default function Skyline({ projects, onRequestReorder, truthOverride }: S
                 overflow: 'hidden', transition: 'transform .25s ease, height .5s ease',
               }}>
                 <div style={{ position: 'absolute', inset: 0, background: tv.tint, pointerEvents: 'none' }} />
-                <Grid sessions={b.recentSessions} h={b.h} winOnGlow={tv.winOnGlow} />
+                <Grid sessions={b.recentSessions} h={b.h} winOnGlow={winOnGlow} />
                 <div style={{ position: 'absolute', left: '50%', bottom: 0, transform: 'translateX(-50%)', width: '22px', height: '30px', borderRadius: '11px 11px 0 0', background: b.colors.door }} />
                 {b.id === selectedId && <div style={{ position: 'absolute', inset: 0, borderRadius: '10px 10px 0 0', boxShadow: 'inset 0 0 0 3px var(--accent)', pointerEvents: 'none' }} />}
               </div>

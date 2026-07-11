@@ -81,6 +81,7 @@ export interface WeeklyReview {
   totalHoursThisWeek: number;
   totalHoursLastWeek: number;
   sessionsThisWeek: number;
+  sessionsLastWeek: number;
   activeProjectsThisWeek: number;
   longestStreakDays: number;
   busiestDay: { label: string; hours: number } | null;
@@ -108,4 +109,22 @@ export interface Summary {
   streakDays: number;
   hoursThisWeek: number;
   visitsThisMonth: number;
+}
+
+// Energy check-ins: exactly Katie's four states, no numeric scale.
+export type EnergyLevel = 'Green' | 'Yellow' | 'Orange' | 'Red';
+
+export interface EnergyEntry {
+  createdAt: string;
+  level: EnergyLevel;
+  note: string;
+}
+
+// The energy forecast: skyline weather plus the plain-language reasons that
+// produced it — every warning can name its evidence.
+export type Weather = 'clear' | 'clouding' | 'storm';
+
+export interface EnergyForecast {
+  weather: Weather;
+  reasons: string[];
 }

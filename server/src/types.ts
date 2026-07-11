@@ -91,6 +91,7 @@ export interface WeeklyReview {
   totalHoursThisWeek: number;
   totalHoursLastWeek: number;
   sessionsThisWeek: number;
+  sessionsLastWeek: number;
   activeProjectsThisWeek: number;
   longestStreakDays: number;
   busiestDay: { label: string; hours: number } | null;

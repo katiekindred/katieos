@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import {
-  archiveProject, configuredWorkspaces, createProject, fetchProjects,
+  archiveProject, configuredWorkspaces, createProject, explainLastVisit, fetchProjects,
   updateProjectFields, writeReorderEvent
 } from '../lib/notion.js';
 
@@ -12,6 +12,11 @@ projectsRouter.get('/', async (_req, res) => {
   }
   const { projects } = await fetchProjects();
   res.json({ projects });
+});
+
+// Debug: explain what "last visited" resolves to for a project and which task drives it.
+projectsRouter.get('/:id/last-visit', async (req, res) => {
+  res.json(await explainLastVisit(req.params.id));
 });
 
 projectsRouter.post('/', async (req, res) => {

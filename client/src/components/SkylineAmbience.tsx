@@ -1,13 +1,15 @@
 import type { CSSProperties } from 'react';
+import type { Weather } from '../types';
 import type { Flavor } from './skylineTheme';
 
-function Cloud({ top, scale, opacity, dur, delay, blur }: {
-  top: string; scale: number; opacity: number; dur: number; delay: number; blur?: number;
+function Cloud({ top, scale, opacity, dur, delay, blur, tone }: {
+  top: string; scale: number; opacity: number; dur: number; delay: number; blur?: number; tone?: string;
 }) {
+  const fill = tone || '#fffdf7';
   const px = (n: number) => n * scale + 'px';
   const puff = (d: number, l: number, t: number, key: string): [string, CSSProperties] => [key, {
     position: 'absolute', width: px(d), height: px(d), left: px(l), top: px(t),
-    borderRadius: '50%', background: '#fffdf7',
+    borderRadius: '50%', background: fill,
   }];
   const puffs = [
     puff(84, 48, 10, 'p1'), puff(58, 14, 36, 'p2'), puff(64, 108, 28, 'p3'),
@@ -18,7 +20,7 @@ function Cloud({ top, scale, opacity, dur, delay, blur }: {
       filter: `blur(${blur || 2}px)`, opacity,
       animation: `wf-cloud ${dur}s linear ${delay}s infinite`, willChange: 'transform', pointerEvents: 'none',
     }}>
-      <div style={{ position: 'absolute', width: px(176), height: px(52), left: px(7), top: px(58), borderRadius: px(26), background: '#fffdf7' }} />
+      <div style={{ position: 'absolute', width: px(176), height: px(52), left: px(7), top: px(58), borderRadius: px(26), background: fill }} />
       {puffs.map(([key, style]) => <div key={key} style={style} />)}
     </div>
   );
@@ -129,4 +131,49 @@ export function SkylineAmbience({ flavor }: { flavor: Flavor }) {
   if (flavor === 'night') return <NightAmbience />;
   if (flavor === 'dusk') return <DuskAmbience />;
   return <DayAmbience />;
+}
+
+// ---- Energy weather ---------------------------------------------------------
+// The energy forecast rendered as village weather, layered over the time-of-day
+// ambience. Deliberately gentle: `clouding` is a soft overcast (a dim wash and
+// a couple of drifting gray clouds), `storm` adds a cozy drizzle — the village
+// hunkers down, nothing flashes red or reads as an alarm.
+
+function Drizzle() {
+  const drops = [];
+  for (let i = 1; i <= 26; i++) {
+    const left = 2 + rnd(i, 17.31) * 96;
+    const dur = 1.7 + rnd(i, 6.71) * 1.1;
+    const delay = -rnd(i, 3.19) * 4;
+    const len = 11 + rnd(i, 9.43) * 7;
+    drops.push(
+      <div key={`rd${i}`} style={{
+        position: 'absolute', left: left.toFixed(1) + '%', top: '-24px',
+        width: '2px', height: len.toFixed(0) + 'px', borderRadius: '2px',
+        background: 'linear-gradient(180deg, rgba(150,163,205,0.05), rgba(150,163,205,0.55))',
+        animation: `wf-rain ${dur.toFixed(2)}s linear ${delay.toFixed(2)}s infinite`, willChange: 'transform',
+      }} />
+    );
+  }
+  return <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }}>{drops}</div>;
+}
+
+export function EnergyWeatherOverlay({ weather, flavor }: { weather: Weather; flavor: Flavor }) {
+  if (weather === 'clear') return null;
+  // Softer, grayer clouds than the sunny-day ones; a touch dimmer at night so
+  // they read as overcast rather than glowing.
+  const tone = flavor === 'night' ? '#8f8aa6' : flavor === 'dusk' ? '#b7a8b8' : '#ded8d2';
+  const cloudOpacity = flavor === 'day' ? 0.75 : 0.55;
+  return (
+    <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+      <div style={{
+        position: 'absolute', inset: 0,
+        background: 'linear-gradient(180deg, rgba(94,88,116,0.20), rgba(94,88,116,0.08) 55%, transparent 80%)',
+      }} />
+      <Cloud top="4%" scale={1.5} opacity={cloudOpacity} dur={110} delay={-35} blur={3} tone={tone} />
+      <Cloud top="16%" scale={1.0} opacity={cloudOpacity * 0.85} dur={88} delay={-62} blur={3} tone={tone} />
+      {weather === 'storm' && <Cloud top="9%" scale={0.75} opacity={cloudOpacity * 0.8} dur={72} delay={-18} blur={2} tone={tone} />}
+      {weather === 'storm' && <Drizzle />}
+    </div>
+  );
 }

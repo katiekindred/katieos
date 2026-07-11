@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { api } from '../api';
-import type { CalendarEvent, FeedEntry, FieldUpdate, Narrative, PickerField, Project, Summary, TaskLite, WeeklyReview } from '../types';
+import type { CalendarEvent, EnergyForecast, EnergyLevel, FeedEntry, FieldUpdate, Narrative, PickerField, Project, Summary, TaskLite, WeeklyReview } from '../types';
 import Confetti from './Confetti';
 import { HOUSE_COLORS, colorsFor } from './houseColors';
 import NotionFieldDropdown from './NotionFieldDropdown';
@@ -14,6 +14,39 @@ const INK = '#4a3a2e';
 const INK_SOFT = '#8d7a66';
 const USER_NAME = 'Katie';
 const LIVE_SESSION_KEY = 'katieos-live-session';
+
+// Energy check-in strip: ask at most once per 4 hours. A skip parks the strip
+// for the same window (persisted like the live-timer state, so a refresh
+// doesn't re-ask); answering hides it until the next window.
+const ENERGY_DISMISS_KEY = 'katieos-energy-dismissed';
+const ENERGY_ASK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+const ENERGY_DOTS: { level: EnergyLevel; color: string }[] = [
+  { level: 'Green', color: '#7ebe8c' },
+  { level: 'Yellow', color: '#e2b74e' },
+  { level: 'Orange', color: '#e0906c' },
+  { level: 'Red', color: '#b4453b' },
+];
+
+// The forecast nudge is template-composed from the forecast's reasons:
+// evidence first, then one direct recommendation. Rotated deterministically by
+// date so it doesn't read like a broken record.
+function joinReasons(reasons: string[]): string {
+  if (reasons.length <= 1) return reasons[0] ?? '';
+  if (reasons.length === 2) return `${reasons[0]} and ${reasons[1]}`;
+  return `${reasons.slice(0, -1).join(', ')}, and ${reasons[reasons.length - 1]}`;
+}
+const FORECAST_NUDGE_TEMPLATES: ((evidence: string) => string)[] = [
+  ev => `${ev}. Recommend picking one project this week and parking the rest.`,
+  ev => `${ev}. Cut the active list to one building and protect an evening of rest.`,
+  ev => `${ev}. Pick the single project that matters most right now and let the others sit dark.`,
+  ev => `${ev}. Book one short session on your top building and treat the rest of the week as recovery.`,
+];
+function forecastNudgeBody(f: EnergyForecast): string {
+  const raw = joinReasons(f.reasons);
+  const evidence = raw.charAt(0).toUpperCase() + raw.slice(1);
+  const idx = Math.floor(Date.now() / 86400000) % FORECAST_NUDGE_TEMPLATES.length;
+  return FORECAST_NUDGE_TEMPLATES[idx](evidence);
+}
 
 const DISPLAY_FONT = "'Fraunces', Georgia, serif";
 const BODY_FONT = "'Nunito', system-ui, sans-serif";
@@ -140,6 +173,16 @@ export default function Dashboard() {
   const [narrative, setNarrative] = useState<Narrative | null>(null);
   const [confettiBurst, setConfettiBurst] = useState(0);
 
+  // Energy layer: whether check-ins are configured server-side, the latest
+  // check-in time, the local "skipped at" stamp, a brief thanks flash after
+  // answering, and the current forecast.
+  const [energyAvailable, setEnergyAvailable] = useState(false);
+  const [lastCheckinAt, setLastCheckinAt] = useState<string | null>(null);
+  const [energyDismissedAt, setEnergyDismissedAt] = useState<number>(() => Number(localStorage.getItem(ENERGY_DISMISS_KEY)) || 0);
+  const [energyNote, setEnergyNote] = useState('');
+  const [energyThanks, setEnergyThanks] = useState(false);
+  const [forecast, setForecast] = useState<EnergyForecast | null>(null);
+
   // Open tasks per project, plus which project's task list is expanded and the
   // task a session should attach to (null = the project's next step; 'NEW' = a
   // fresh stub the app creates for Katie to flesh out).
@@ -234,9 +277,22 @@ export default function Dashboard() {
     try { setSchema(await api.taskSchema()); } catch { /* non-fatal */ }
   }, []);
 
+  // A 503 means NOTION_ENERGY_PAGE isn't set — the strip stays hidden.
+  const loadEnergy = useCallback(async () => {
+    try {
+      const entries = await api.energyLog(1);
+      setEnergyAvailable(true);
+      setLastCheckinAt(entries[0]?.createdAt ?? null);
+    } catch { setEnergyAvailable(false); }
+  }, []);
+
+  const loadForecast = useCallback(async () => {
+    try { setForecast(await api.energyForecast()); } catch { /* non-fatal */ }
+  }, []);
+
   useEffect(() => {
-    loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview(); loadSchema(); loadSummary();
-    const t = setInterval(() => { loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview(); loadSummary(); }, 60000);
+    loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview(); loadSchema(); loadSummary(); loadEnergy(); loadForecast();
+    const t = setInterval(() => { loadProjects(); loadCalendar(); loadFeed(); loadNarrative(); loadTasks(); loadReview(); loadSummary(); loadEnergy(); loadForecast(); }, 60000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -267,6 +323,35 @@ export default function Dashboard() {
     } catch { localStorage.removeItem(LIVE_SESSION_KEY); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ----- energy check-in -----
+  async function onEnergyCheckin(level: EnergyLevel) {
+    const note = energyNote;
+    setEnergyNote('');
+    setEnergyThanks(true);
+    setLastCheckinAt(new Date().toISOString());
+    window.setTimeout(() => setEnergyThanks(false), 2500);
+    try {
+      await api.logEnergy(level, note);
+      setSaveError(null);
+      loadForecast();
+    } catch (e: any) {
+      setSaveError(`That check-in didn't reach Notion (${e.message}). It's not saved.`);
+    }
+  }
+  function onEnergySkip() {
+    const at = Date.now();
+    localStorage.setItem(ENERGY_DISMISS_KEY, String(at));
+    setEnergyDismissedAt(at);
+  }
+  // Show only when configured, the latest check-in is older than the ask
+  // window, and it wasn't skipped within the same window. A skipped check-in
+  // is weak signal — it never reads as Red anywhere downstream.
+  const lastCheckinMs = lastCheckinAt ? new Date(lastCheckinAt).getTime() : 0;
+  const showEnergyStrip = energyAvailable && (energyThanks || (
+    Date.now() - lastCheckinMs >= ENERGY_ASK_INTERVAL_MS &&
+    Date.now() - energyDismissedAt >= ENERGY_ASK_INTERVAL_MS
+  ));
 
   const now = new Date();
   const h = now.getHours();
@@ -453,16 +538,21 @@ export default function Dashboard() {
     loadProjects(); loadFeed();
   }
 
+  // Nudge precedence: Claude-written copy, else the forecast nudge when the
+  // weather is clouding or storm (evidence, then a direct recommendation),
+  // else the quiet-project fallback.
   const quietProject = projects.find(p => p.quiet);
   const nudge = narrative?.nudge
     ? { body: narrative.nudge }
-    : quietProject
-      ? {
-        body: `The ${quietProject.name} house misses you — it’s been dark since ${quietProject.lastMoved}. ${quietProject.recoveryNote
-          ? `Last time, ${quietProject.recoveryNote}.`
-          : 'Even a ten-minute visit would light a window.'}`,
-      }
-      : { body: 'Nothing is drifting right now. Every house has had a visitor lately — lovely work.' };
+    : forecast && forecast.weather !== 'clear' && forecast.reasons.length > 0
+      ? { body: forecastNudgeBody(forecast) }
+      : quietProject
+        ? {
+          body: `The ${quietProject.name} house misses you — it’s been dark since ${quietProject.lastMoved}. ${quietProject.recoveryNote
+            ? `Last time, ${quietProject.recoveryNote}.`
+            : 'Even a ten-minute visit would light a window.'}`,
+        }
+        : { body: 'Nothing is drifting right now. Every house has had a visitor lately — lovely work.' };
 
   const roadmap = projects.filter(p => p.nextStep).map(p => ({ step: p.nextStep, project: p.name, target: p.nextTarget || '—' }));
 
@@ -498,6 +588,28 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {showEnergyStrip && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', background: '#fffdf8', border: '2px solid #f0e2cf', borderRadius: '18px', padding: '11px 16px', boxShadow: '0 3px 0 #f0e2cf', animation: 'wf-in .3s ease both' }}>
+            {energyThanks ? (
+              <span style={{ fontSize: '13px', fontWeight: 800, color: INK }}>Logged.</span>
+            ) : (
+              <>
+                <span style={{ fontSize: '12.5px', fontWeight: 800, color: INK, whiteSpace: 'nowrap' }}>Energy check</span>
+                <div style={{ display: 'flex', gap: '7px', flexWrap: 'wrap' }}>
+                  {ENERGY_DOTS.map(d => (
+                    <div key={d.level} onClick={() => onEnergyCheckin(d.level)} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '7px', padding: '6px 12px', borderRadius: '12px', background: '#fff', border: '2px solid #ecdcc5' }}>
+                      <span style={{ width: '11px', height: '11px', borderRadius: '50%', background: d.color }} />
+                      <span style={{ fontSize: '12px', fontWeight: 800, color: INK }}>{d.level}</span>
+                    </div>
+                  ))}
+                </div>
+                <input value={energyNote} onChange={e => setEnergyNote(e.target.value)} placeholder="Note, optional" style={{ ...input, flex: 1, minWidth: '150px', maxWidth: '280px', fontSize: '12px', padding: '7px 11px' }} />
+                <div onClick={onEnergySkip} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '5px 11px', border: '2px solid #f0e2cf', borderRadius: '10px', whiteSpace: 'nowrap' }}>Skip</div>
+              </>
+            )}
+          </div>
+        )}
+
         {loadError && (
           <div style={{ background: '#fdf1ef', border: '2px solid #f3d3cc', color: '#9a3b2a', borderRadius: '14px', padding: '12px 16px', fontSize: '13px', fontWeight: 600 }}>
             {loadError}
@@ -510,7 +622,7 @@ export default function Dashboard() {
               Loading your skyline from Notion…
             </div>
           )}
-          {loaded && projects.length > 0 && <Skyline projects={projects} truthOverride={narrative?.skyline ?? null} onRequestReorder={() => priorityRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })} />}
+          {loaded && projects.length > 0 && <Skyline projects={projects} truthOverride={narrative?.skyline ?? null} energyWeather={forecast?.weather ?? 'clear'} onRequestReorder={() => priorityRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })} />}
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1.35fr 1fr', gap: '24px', alignItems: 'start' }}>

@@ -1,4 +1,4 @@
-import type { CalendarEvent, FeedEntry, FieldUpdate, Narrative, PickerField, Project, Summary, TaskLite, WeeklyReview } from './types';
+import type { CalendarEvent, EnergyEntry, EnergyForecast, EnergyLevel, FeedEntry, FieldUpdate, Narrative, PickerField, Project, Summary, TaskLite, WeeklyReview } from './types';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -45,4 +45,11 @@ export const api = {
 
   weeklyReview: () => req<WeeklyReview>('/review/weekly'),
   summary: () => req<Summary>('/summary'),
+
+  // Energy check-ins land as appended lines on a Notion page; 503 means the
+  // page isn't configured and the check-in strip should hide.
+  energyLog: (days = 1) => req<{ entries: EnergyEntry[] }>(`/energy?days=${days}`).then(r => r.entries),
+  logEnergy: (level: EnergyLevel, note: string) =>
+    req<{ entry: EnergyEntry }>('/energy', { method: 'POST', body: JSON.stringify({ level, note }) }),
+  energyForecast: () => req<EnergyForecast>('/energy/forecast'),
 };

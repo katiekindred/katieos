@@ -1,10 +1,13 @@
 import { Client } from '@notionhq/client';
 import type { ActivityLogEntry, FieldOption, FieldUpdate, PickerField, Project, TaskLite, WeeklyReview } from '../types.js';
 import {
-  computeActivity, computeHoursThisWeek, computeQuiet, computeStature,
+  centralDaysAgo, CENTRAL_TZ, computeActivity, computeHoursThisWeek, computeQuiet, computeStature,
   computeTotalHours, computeTrend, computeWeek, computeWeeklyReview, countRecentSessions,
-  findRecovery, formatSessionLine, parseSessionLine, parseThresholdDays
+  findRecovery, formatEnergyLine, formatSessionLine, parseEnergyLine, parseSessionLine,
+  parseThresholdDays, type EnergyLine
 } from './derive.js';
+
+const CENTRAL_MONTH_YEAR = new Intl.DateTimeFormat('en-US', { timeZone: CENTRAL_TZ, month: 'long', year: 'numeric' });
 
 function env(name: string): string | undefined {
   return process.env[name];
@@ -153,13 +156,12 @@ function isWorkRow(props: any): boolean {
 
 export function humanizeLastMoved(iso: string | null): string {
   if (!iso) return '—';
-  const then = new Date(iso);
-  const days = Math.floor((Date.now() - then.getTime()) / 86400000);
+  const days = centralDaysAgo(iso); // Central calendar days, so "today" flips at local midnight
   if (days <= 0) return 'today';
   if (days === 1) return 'yesterday';
   if (days < 7) return `${days} days ago`;
   if (days < 30) return `${Math.round(days / 7)} week${Math.round(days / 7) === 1 ? '' : 's'} ago`;
-  return then.toLocaleDateString([], { month: 'long', year: 'numeric' });
+  return CENTRAL_MONTH_YEAR.format(new Date(iso));
 }
 
 interface TaskRow {
@@ -176,6 +178,7 @@ interface TaskRow {
   urgencyId: string | null;
   source: string;
   createdTime: string;
+  lastEditedTime: string | null;
 }
 
 async function fetchAllTasks(): Promise<TaskRow[]> {
@@ -198,8 +201,43 @@ async function fetchAllTasks(): Promise<TaskRow[]> {
       urgencyId: props['Urgency']?.select?.id ?? null,
       source: props['Source']?.select?.name || 'notion-task',
       createdTime: page.created_time,
+      lastEditedTime: page.last_edited_time ?? null,
     };
   });
+}
+
+// "Last visited" is driven purely by task activity in Notion: the most recently
+// added-or-edited task for a project (status changes, completion, or a session
+// the app appends to a task body all bump Notion's last_edited_time). A project
+// with no tasks has no visit — deliberately no fallback to the project page's
+// own edit time, so tweaking the project's fields doesn't read as a visit.
+function projectLastVisit(tasks: TaskRow[], projectId: string): { lastMovedAt: string | null; drivingTask: TaskRow | null } {
+  let drivingTask: TaskRow | null = null;
+  for (const t of tasks) {
+    if (t.projectId !== projectId || !t.lastEditedTime) continue;
+    if (!drivingTask || new Date(t.lastEditedTime).getTime() > new Date(drivingTask.lastEditedTime!).getTime()) {
+      drivingTask = t;
+    }
+  }
+  return { lastMovedAt: drivingTask?.lastEditedTime ?? null, drivingTask };
+}
+
+// Debug helper: for one project, show what "last visited" resolves to and which
+// task set it — a quick way to confirm why the label reads the way it does.
+export async function explainLastVisit(projectId: string) {
+  if (!isConfigured()) return { projectId, lastMovedAt: null, lastMoved: '—', drivingTask: null };
+  const tasks = await fetchAllTasks();
+  const { lastMovedAt, drivingTask } = projectLastVisit(tasks, projectId);
+  return {
+    projectId,
+    lastMovedAt,
+    lastMoved: humanizeLastMoved(lastMovedAt),
+    taskCount: tasks.filter(t => t.projectId === projectId).length,
+    drivingTask: drivingTask && {
+      id: drivingTask.id, name: drivingTask.name, status: drivingTask.status,
+      lastEditedTime: drivingTask.lastEditedTime,
+    },
+  };
 }
 
 const DONE_STATUSES = new Set(['Done', 'Irrelevant']);
@@ -306,10 +344,7 @@ export async function fetchProjects(): Promise<{ projects: Project[]; log: Activ
   const projects: Project[] = visible.map((page: any, i: number) => {
     const props = page.properties;
     const projectLog = log.filter(e => e.projectId === page.id);
-    const lastMovedAt = projectLog.reduce<string | null>((latest, e) => {
-      if (!latest) return e.createdAt;
-      return new Date(e.createdAt).getTime() > new Date(latest).getTime() ? e.createdAt : latest;
-    }, null) || page.last_edited_time || null;
+    const { lastMovedAt } = projectLastVisit(tasks, page.id);
 
     const thresholdStr = text(props['Check-in threshold']) || '2 weeks';
     const thresholdDays = parseThresholdDays(thresholdStr);
@@ -559,6 +594,53 @@ export async function fetchNarrative(): Promise<{ skyline: string | null; nudge:
   const value = { skyline, nudge };
   narrativeCache = { at: Date.now(), value };
   return value;
+}
+
+// ---- Energy check-ins -------------------------------------------------------
+// Check-ins are appended lines on NOTION_ENERGY_PAGE, the same pattern as
+// session lines on a task page: Notion stays the system of record and Katie's
+// scheduled Claude tasks can read the page later. When the env var is unset,
+// both calls are graceful no-ops — the check-in UI hides and inference runs
+// without self-report signals (same philosophy as fetchPageText).
+
+export function isEnergyConfigured(): boolean {
+  return !!(env('NOTION_TOKEN') && env('NOTION_ENERGY_PAGE'));
+}
+
+let energyCache: { at: number; entries: EnergyLine[] } | null = null;
+const ENERGY_TTL_MS = 5 * 60 * 1000;
+
+export async function appendEnergyLine(line: EnergyLine): Promise<void> {
+  if (!isEnergyConfigured()) return;
+  await client().blocks.children.append({
+    block_id: env('NOTION_ENERGY_PAGE')!,
+    children: [paragraph(formatEnergyLine(line))],
+  });
+  energyCache = null; // bust so the next read sees the new entry
+}
+
+// All parseable check-in lines on the page, newest first. Read errors (page
+// missing or not shared) fall back quietly to an empty log.
+export async function fetchEnergyLog(): Promise<EnergyLine[]> {
+  if (!isEnergyConfigured()) return [];
+  if (energyCache && Date.now() - energyCache.at < ENERGY_TTL_MS) return energyCache.entries;
+  try {
+    const entries: EnergyLine[] = [];
+    let cursor: string | undefined;
+    do {
+      const res: any = await client().blocks.children.list({ block_id: env('NOTION_ENERGY_PAGE')!, start_cursor: cursor, page_size: 100 });
+      for (const b of res.results as any[]) {
+        const parsed = parseEnergyLine(blockText(b));
+        if (parsed) entries.push(parsed);
+      }
+      cursor = res.has_more ? (res.next_cursor ?? undefined) : undefined;
+    } while (cursor);
+    entries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    energyCache = { at: Date.now(), entries };
+    return entries;
+  } catch {
+    return [];
+  }
 }
 
 export async function writeReorderEvent(projectId: string, newPriority: number, reason: string | null) {

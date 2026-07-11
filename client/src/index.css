@@ -26,3 +26,7 @@ body { margin: 0; background: #f2e0c8; font-family: 'Nunito', system-ui, sans-se
   100% { opacity:0; transform: translate(178px,65px) rotate(20deg) scaleX(1); }
 }
 @keyframes sk-wisp { from{transform:translateX(0)} to{transform:translateX(1220px)} }
+
+/* Energy-forecast storm: a cozy drizzle falling the full height of the
+   skyline (the per-house rain cloud keeps its own shorter wf-drop). */
+@keyframes wf-rain { from{transform:translateY(0)} to{transform:translateY(860px)} }
