@@ -285,22 +285,30 @@ function centralWeekWindows(now: number): {
 
 export interface Summary { streakDays: number; hoursThisWeek: number; visitsThisMonth: number }
 
+// Longest run of consecutive Central days ending today (i=0) with any logged
+// session. Shared by the stickers streak and the weekly reflection. Steps back
+// from anchorNoon (noon UTC of today's Central date), not `now`, so the walk
+// stays DST-proof.
+export function computeStreakDays(log: ActivityLogEntry[], now: number): number {
+  const { anchorNoon } = centralWeekWindows(now);
+  const touched = new Set<string>();
+  for (const e of log) touched.add(centralDayKey(new Date(e.createdAt).getTime()));
+  let streak = 0;
+  for (let i = 0; i < 60; i++) {
+    if (touched.has(centralDayKey(anchorNoon - i * DAY_MS))) streak++;
+    else break;
+  }
+  return streak;
+}
+
 // Stickers-row stats: the longest run of consecutive days (ending today) with
 // any logged session, hours logged so far this week (Central, weeks start
 // Monday), and how many sessions were logged this calendar month — across every
 // project. All three are reckoned against the Central calendar, not UTC.
 export function computeSummary(log: ActivityLogEntry[], now: number = Date.now()): Summary {
-  const { anchorNoon, thisWeekDays } = centralWeekWindows(now);
+  const { thisWeekDays } = centralWeekWindows(now);
 
-  const touchedDays = new Set<string>();
-  for (const e of log) touchedDays.add(centralDayKey(new Date(e.createdAt).getTime()));
-
-  let streakDays = 0;
-  for (let i = 0; i < 60; i++) {
-    const key = centralDayKey(anchorNoon - i * DAY_MS);
-    if (touchedDays.has(key)) streakDays++;
-    else break;
-  }
+  const streakDays = computeStreakDays(log, now);
 
   // Week-to-date: sum sessions whose Central date falls on Monday-through-today.
   const hoursThisWeek = hoursOnDays(log, thisWeekDays);
@@ -319,7 +327,7 @@ export function computeWeeklyReview(
   // Central calendar weeks (Monday-start): this week is Monday-to-today; last
   // week is the same-length week-to-date slice of the prior week, so the two are
   // always compared over an equal number of days.
-  const { anchorNoon, thisWeekDays, lastWeekDays } = centralWeekWindows(now);
+  const { thisWeekDays, lastWeekDays } = centralWeekWindows(now);
   const nameById = new Map(projects.map(p => [p.id, p.name]));
 
   const byProject = projects.map(p => {
@@ -348,15 +356,7 @@ export function computeWeeklyReview(
     }
   }
 
-  // Longest run of consecutive Central days (ending today) with any logged session.
-  const touchedDays = new Set<string>();
-  for (const e of log) touchedDays.add(centralDayKey(new Date(e.createdAt).getTime()));
-  let longestStreakDays = 0;
-  for (let i = 0; i < 60; i++) {
-    const key = centralDayKey(anchorNoon - i * DAY_MS);
-    if (touchedDays.has(key)) longestStreakDays++;
-    else break;
-  }
+  const longestStreakDays = computeStreakDays(log, now);
 
   const rising = byProject.filter(p => p.hoursThisWeek > 0 && p.delta > 0).sort((a, b) => b.delta - a.delta).map(p => p.name);
   const fading = byProject.filter(p => p.hoursLastWeek > 0 && p.delta < 0).sort((a, b) => a.delta - b.delta).map(p => p.name);

@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties 
 import { api } from '../api';
 import type { CalendarEvent, EnergyForecast, EnergyLevel, FeedEntry, FieldUpdate, Narrative, PickerField, Project, Summary, TaskLite, WeeklyReview } from '../types';
 import Confetti from './Confetti';
-import { HOUSE_COLORS, colorsFor } from './houseColors';
+import { HEX_RE, HOUSE_COLORS, colorsFor } from './houseColors';
 import NotionFieldDropdown from './NotionFieldDropdown';
 import Skyline from './Skyline';
 import { TREND_COLORS, trendWord } from './village';
@@ -76,8 +76,6 @@ function fmtDur(sec: number): string {
   if (m < 60) return `${m}m`;
   return m % 60 === 0 ? `${m / 60}h` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
-
-const HEX_RE = /^#?[0-9a-fA-F]{6}$/;
 
 const input: CSSProperties = {
   width: '100%', fontFamily: 'inherit', fontSize: '12.5px', color: INK,
@@ -225,8 +223,11 @@ export default function Dashboard() {
   const [manFields, setManFields] = useState<Fields>(BLANK_FIELDS);
   const [manOrig, setManOrig] = useState<Fields>(BLANK_FIELDS);
 
+  const confettiTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   function celebrate() {
     setConfettiBurst(Date.now());
+    if (confettiTimer.current) clearTimeout(confettiTimer.current);
+    confettiTimer.current = setTimeout(() => setConfettiBurst(0), 4200);
   }
 
   const tasksFor = (projectId: string | null) =>
@@ -437,9 +438,9 @@ export default function Dashboard() {
   async function saveEdit(id: string) {
     if (!draft) return;
     setEditingId(null);
-    setProjects(ps => ps.map(p => p.id === id ? { ...p, name: draft.name, blurb: draft.blurb, nextStep: draft.nextStep, houseColor: draft.houseColor } : p));
+    setProjects(ps => ps.map(p => p.id === id ? { ...p, name: draft.name, blurb: draft.blurb, threshold: draft.threshold, nextStep: draft.nextStep, houseColor: draft.houseColor } : p));
     try {
-      await api.updateProject(id, { name: draft.name, blurb: draft.blurb, nextStep: draft.nextStep, houseColor: draft.houseColor });
+      await api.updateProject(id, { name: draft.name, blurb: draft.blurb, nextStep: draft.nextStep, threshold: draft.threshold, houseColor: draft.houseColor });
       setSaveError(null);
     } catch (e: any) {
       setSaveError(`Couldn't save project changes to Notion: ${e.message}`);
@@ -854,8 +855,10 @@ export default function Dashboard() {
                                 const raw = e.target.value;
                                 setDraft(d => {
                                   if (!d) return d;
-                                  const norm = raw.startsWith('#') ? raw : `#${raw}`;
-                                  return { ...d, colorHexInput: raw, houseColor: HEX_RE.test(norm) ? norm.toLowerCase() : d.houseColor };
+                                  const trimmed = raw.trim();
+                                  const norm = trimmed.startsWith('#') ? trimmed : `#${trimmed}`;
+                                  const houseColor = trimmed === '' ? null : (HEX_RE.test(norm) ? norm.toLowerCase() : d.houseColor);
+                                  return { ...d, colorHexInput: raw, houseColor };
                                 });
                               }}
                               onKeyDown={e => e.key === 'Enter' && saveEdit(p.id)}

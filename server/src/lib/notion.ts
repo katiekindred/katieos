@@ -652,7 +652,7 @@ export async function writeReorderEvent(projectId: string, newPriority: number, 
 }
 
 export async function updateProjectFields(projectId: string, fields: Partial<{
-  name: string; blurb: string; nextStep: string; status: string; houseColor: string | null;
+  name: string; blurb: string; nextStep: string; status: string; threshold: string; houseColor: string | null;
 }>) {
   await ensureSchema();
   const properties: Record<string, any> = {};
@@ -660,6 +660,7 @@ export async function updateProjectFields(projectId: string, fields: Partial<{
   if (fields.blurb != null) properties['Description'] = { rich_text: [{ text: { content: fields.blurb } }] };
   if (fields.nextStep != null) properties['Next Step Override'] = { rich_text: [{ text: { content: fields.nextStep } }] };
   if (fields.status != null) properties['Status'] = { select: { name: fields.status } };
+  if (fields.threshold != null) properties['Check-in threshold'] = { rich_text: [{ text: { content: fields.threshold } }] };
   if (fields.houseColor !== undefined) {
     properties['House Color'] = { rich_text: fields.houseColor ? [{ text: { content: fields.houseColor } }] : [] };
   }

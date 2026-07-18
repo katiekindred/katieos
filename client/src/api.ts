@@ -16,7 +16,7 @@ export const api = {
   projects: () => req<{ projects: Project[] }>('/projects').then(r => r.projects),
   createProject: (name: string, priority: number) =>
     req<{ id: string }>('/projects', { method: 'POST', body: JSON.stringify({ name, priority }) }),
-  updateProject: (id: string, fields: Partial<{ name: string; blurb: string; nextStep: string; status: string; houseColor: string | null }>) =>
+  updateProject: (id: string, fields: Partial<{ name: string; blurb: string; nextStep: string; status: string; threshold: string; houseColor: string | null }>) =>
     req<{ ok: true }>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(fields) }),
   removeProject: (id: string) => req<{ ok: true }>(`/projects/${id}`, { method: 'DELETE' }),
   reorder: (order: string[], reason: string | null) =>
