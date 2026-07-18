@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { api } from '../api';
 import type { CalendarEvent, EnergyForecast, EnergyLevel, FeedEntry, FieldUpdate, Narrative, PickerField, Project, Summary, TaskLite, WeeklyReview } from '../types';
 import Confetti from './Confetti';
@@ -51,7 +51,7 @@ function forecastNudgeBody(f: EnergyForecast): string {
 const DISPLAY_FONT = "'Fraunces', Georgia, serif";
 const BODY_FONT = "'Nunito', system-ui, sans-serif";
 
-type CapMode = 'idle' | 'picking' | 'running' | 'noting';
+type CapMode = 'idle' | 'picking' | 'running' | 'paused' | 'noting';
 
 function fmtClock(s: number): string {
   const m = Math.floor(s / 60), ss = s % 60;
@@ -84,6 +84,11 @@ const input: CSSProperties = {
   padding: '9px 12px', border: '2px solid #ecdcc5', borderRadius: '12px', outline: 'none', background: '#fff',
 };
 
+const dropLineStyle: CSSProperties = {
+  height: '3px', borderRadius: '2px', background: ACCENT, flex: '0 0 auto',
+  boxShadow: '0 0 0 4px rgba(201,111,78,.15)',
+};
+
 const taskChip = (selected: boolean): CSSProperties => ({
   cursor: 'pointer', fontSize: '11.5px', fontWeight: 800, padding: '6px 10px', borderRadius: '10px',
   maxWidth: '190px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
@@ -96,11 +101,11 @@ const stickerCard: CSSProperties = {
   padding: '24px 24px 20px', boxShadow: '0 5px 0 #f0e2cf',
 };
 
-// The Notion fields the logger can set on a task: Importance + Urgency (colored
-// option pickers) and Status Notes (free text). Populated from the task when it
-// exists, blank for a new stub.
-interface Fields { importance: string | null; urgency: string | null; statusNotes: string }
-const BLANK_FIELDS: Fields = { importance: null, urgency: null, statusNotes: '' };
+// The Notion fields the logger can set on a task: Importance + Urgency + Status
+// (colored option pickers) and Status Notes (free text). Populated from the task
+// when it exists, blank for a new stub.
+interface Fields { importance: string | null; urgency: string | null; status: string | null; statusNotes: string }
+const BLANK_FIELDS: Fields = { importance: null, urgency: null, status: null, statusNotes: '' };
 const fieldLabel: CSSProperties = { fontSize: '11px', color: INK_SOFT, marginBottom: '5px', fontWeight: 700 };
 
 // Module-scope so the Status Notes text input keeps focus across keystrokes.
@@ -108,6 +113,7 @@ function TaskFieldEditors({ schema, fields, onChange }: { schema: PickerField[];
   if (schema.length === 0) return null;
   const importance = schema.find(f => f.name === 'Importance');
   const urgency = schema.find(f => f.name === 'Urgency');
+  const status = schema.find(f => f.name === 'Status');
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '12px' }}>
       {importance && (
@@ -122,6 +128,12 @@ function TaskFieldEditors({ schema, fields, onChange }: { schema: PickerField[];
           <NotionFieldDropdown field={urgency} value={fields.urgency ? [fields.urgency] : []} onChange={ids => onChange({ ...fields, urgency: ids[0] ?? null })} />
         </div>
       )}
+      {status && (
+        <div>
+          <div style={fieldLabel}>Status</div>
+          <NotionFieldDropdown field={status} value={fields.status ? [fields.status] : []} onChange={ids => onChange({ ...fields, status: ids[0] ?? null })} />
+        </div>
+      )}
       <div>
         <div style={fieldLabel}>Status notes</div>
         <input value={fields.statusNotes} onChange={e => onChange({ ...fields, statusNotes: e.target.value })} placeholder="Where it's at / why it's parked…" style={input} />
@@ -131,10 +143,13 @@ function TaskFieldEditors({ schema, fields, onChange }: { schema: PickerField[];
 }
 
 // Which fields differ from the task's current values — only those get written.
-function fieldUpdates(draft: Fields, orig: Fields): FieldUpdate[] {
+// statusType is the Notion property kind for "Status" (a status-type property in
+// Katie's DB, but tolerant of a select), read from the live schema.
+function fieldUpdates(draft: Fields, orig: Fields, statusType: 'select' | 'status' = 'status'): FieldUpdate[] {
   const u: FieldUpdate[] = [];
   if ((draft.importance ?? null) !== (orig.importance ?? null)) u.push({ name: 'Importance', type: 'select', optionIds: draft.importance ? [draft.importance] : [] });
   if ((draft.urgency ?? null) !== (orig.urgency ?? null)) u.push({ name: 'Urgency', type: 'select', optionIds: draft.urgency ? [draft.urgency] : [] });
+  if ((draft.status ?? null) !== (orig.status ?? null)) u.push({ name: 'Status', type: statusType, optionIds: draft.status ? [draft.status] : [] });
   if ((draft.statusNotes ?? '') !== (orig.statusNotes ?? '')) u.push({ name: 'Status Notes', type: 'text', text: draft.statusNotes });
   return u;
 }
@@ -152,7 +167,10 @@ export default function Dashboard() {
   const [summary, setSummary] = useState<Summary | null>(null);
 
   const [dragId, setDragId] = useState<string | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [reorderMsg, setReorderMsg] = useState<string | null>(null);
+  const [reorderOrder, setReorderOrder] = useState<string[] | null>(null);
+  const [reorderReason, setReorderReason] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ProjectDraft | null>(null);
 
@@ -161,7 +179,12 @@ export default function Dashboard() {
   const [capSeconds, setCapSeconds] = useState(0);
   const [capNote, setCapNote] = useState('');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const capStartRef = useRef<number | null>(null);
+  // Timer accounting that survives pause/resume: seconds banked from finished
+  // run segments, plus the wall-clock start of the current running segment
+  // (null while paused). Elapsed = accum + (now − segStart) when running.
+  const accumRef = useRef(0);
+  const segStartRef = useRef<number | null>(null);
+  const [capMarkDone, setCapMarkDone] = useState(false);
 
   const [manProject, setManProject] = useState<string | null>(null);
   const [manDur, setManDur] = useState('');
@@ -213,7 +236,9 @@ export default function Dashboard() {
   // Current field values of a task (for populating the editors), or blanks.
   const fieldsOfTask = (taskId: string | null): Fields => {
     const t = taskId ? tasks.find(x => x.id === taskId) : null;
-    return t ? { importance: t.importanceId, urgency: t.urgencyId, statusNotes: t.statusNotes } : { ...BLANK_FIELDS };
+    if (!t) return { ...BLANK_FIELDS };
+    const statusId = statusField?.options.find(o => o.name === t.status)?.id ?? null;
+    return { importance: t.importanceId, urgency: t.urgencyId, status: statusId, statusNotes: t.statusNotes };
   };
   // The task a session will actually land on: an explicit pick, else the
   // project's next step, else none (a new stub will be created).
@@ -222,6 +247,10 @@ export default function Dashboard() {
     if (sel) return sel;
     return tasks.find(t => t.projectId === projectId && t.isNextStep)?.id ?? null;
   };
+
+  // The Notion "Status" property (a status-type field), pulled from the live
+  // schema so the task list can offer its exact options and colors.
+  const statusField = schema.find(f => f.name === 'Status') ?? null;
 
   const heroRef = useRef<HTMLDivElement>(null);
   const priorityRef = useRef<HTMLDivElement>(null);
@@ -317,8 +346,12 @@ export default function Dashboard() {
     const raw = localStorage.getItem(LIVE_SESSION_KEY);
     if (!raw) return;
     try {
-      const { projectId, startedAt } = JSON.parse(raw);
-      if (projectId && typeof startedAt === 'number') startTicking(projectId, startedAt);
+      const s = JSON.parse(raw);
+      if (!s.projectId) { localStorage.removeItem(LIVE_SESSION_KEY); return; }
+      // Current shape: { projectId, accumSec, segStartedAt } (segStartedAt null
+      // while paused). Legacy shape: { projectId, startedAt } — a running segment.
+      if (typeof s.accumSec === 'number') startTicking(s.projectId, s.accumSec, typeof s.segStartedAt === 'number' ? s.segStartedAt : null);
+      else if (typeof s.startedAt === 'number') startTicking(s.projectId, 0, s.startedAt);
       else localStorage.removeItem(LIVE_SESSION_KEY);
     } catch { localStorage.removeItem(LIVE_SESSION_KEY); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -359,19 +392,40 @@ export default function Dashboard() {
   const dateStr = now.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
 
   // ----- reorder -----
-  function onDrop(targetId: string) {
-    if (!dragId || dragId === targetId) { setDragId(null); return; }
+  function onDragOverCard(i: number) {
+    return (e: React.DragEvent) => {
+      e.preventDefault();
+      const rect = e.currentTarget.getBoundingClientRect();
+      const isAbove = e.clientY < rect.top + rect.height / 2;
+      setDragOverIndex(isAbove ? i : i + 1);
+    };
+  }
+  function onDrop() {
+    if (!dragId || dragOverIndex === null) { setDragId(null); setDragOverIndex(null); return; }
     const order = projects.map(p => p.id);
     const from = order.indexOf(dragId);
+    const insertAt = dragOverIndex > from ? dragOverIndex - 1 : dragOverIndex;
+    setDragId(null);
+    setDragOverIndex(null);
+    if (insertAt === from) return;
     order.splice(from, 1);
-    order.splice(order.indexOf(targetId), 0, dragId);
+    order.splice(insertAt, 0, dragId);
     const reordered = order.map(id => projects.find(p => p.id === id)!);
     setProjects(reordered);
-    setDragId(null);
     const moved = reordered.find(p => p.id === dragId)!;
     const newRank = order.indexOf(dragId) + 1;
-    setReorderMsg(`${moved.name} moved to #${newRank}. Logged to Notion — reason optional.`);
+    setReorderMsg(`${moved.name} moved to #${newRank}. Logged to Notion.`);
+    setReorderOrder(order);
+    setReorderReason('');
     api.reorder(order, null).catch(() => setReorderMsg('Reorder failed to save — try again.'));
+  }
+  function submitReorderReason() {
+    const reason = reorderReason.trim();
+    if (!reason || !reorderOrder) return;
+    api.reorder(reorderOrder, reason).catch(() => setReorderMsg('Reorder failed to save — try again.'));
+    setReorderMsg(prev => (prev ? prev.replace(/Logged to Notion\.?$/, 'Logged to Notion with your reason.') : prev));
+    setReorderOrder(null);
+    setReorderReason('');
   }
 
   // ----- edit / add / remove -----
@@ -407,25 +461,53 @@ export default function Dashboard() {
   }
 
   // ----- timer -----
-  // The clock is computed from a wall-clock start time (not tick counting), so
-  // it stays honest through background-tab throttling — and the start time is
-  // kept in localStorage so a refresh or closed tab doesn't lose the session.
-  function startTicking(projectId: string, startedAt: number) {
-    capStartRef.current = startedAt;
-    setCapProject(projectId); setCapMode('running');
-    setCapSeconds(Math.floor((Date.now() - startedAt) / 1000));
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = setInterval(() => setCapSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+  // The clock is computed from wall-clock timestamps (not tick counting), so it
+  // stays honest through background-tab throttling. Pause banks the elapsed
+  // seconds into `accum` and drops the segment start; resume opens a new segment.
+  // The whole state is mirrored to localStorage so a refresh or closed tab keeps
+  // the session — paused or running.
+  function computeElapsed(accumSec: number, segStartedAt: number | null): number {
+    return segStartedAt ? accumSec + Math.floor((Date.now() - segStartedAt) / 1000) : accumSec;
   }
-  function onStart() { setCapMode('picking'); setCapSeconds(0); setCapNote(''); setCapTaskId(null); }
+  function persistLive(projectId: string, accumSec: number, segStartedAt: number | null) {
+    localStorage.setItem(LIVE_SESSION_KEY, JSON.stringify({ projectId, accumSec, segStartedAt }));
+  }
+  function startTicking(projectId: string, accumSec: number, segStartedAt: number | null) {
+    accumRef.current = accumSec;
+    segStartRef.current = segStartedAt;
+    setCapProject(projectId);
+    setCapMode(segStartedAt ? 'running' : 'paused');
+    setCapSeconds(computeElapsed(accumSec, segStartedAt));
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (segStartedAt) timerRef.current = setInterval(() => setCapSeconds(computeElapsed(accumRef.current, segStartRef.current)), 1000);
+  }
+  function onStart() { setCapMode('picking'); setCapSeconds(0); setCapNote(''); setCapTaskId(null); setCapMarkDone(false); }
   function pick(id: string) {
-    const startedAt = Date.now();
+    const segStartedAt = Date.now();
     setCapTaskId(null);
-    localStorage.setItem(LIVE_SESSION_KEY, JSON.stringify({ projectId: id, startedAt }));
-    startTicking(id, startedAt);
+    persistLive(id, 0, segStartedAt);
+    startTicking(id, 0, segStartedAt);
+  }
+  function onPause() {
+    if (!capProject) return;
+    if (timerRef.current) clearInterval(timerRef.current);
+    const banked = computeElapsed(accumRef.current, segStartRef.current);
+    accumRef.current = banked;
+    segStartRef.current = null;
+    setCapSeconds(banked);
+    setCapMode('paused');
+    persistLive(capProject, banked, null);
+  }
+  function onResume() {
+    if (!capProject) return;
+    const segStartedAt = Date.now();
+    persistLive(capProject, accumRef.current, segStartedAt);
+    startTicking(capProject, accumRef.current, segStartedAt);
   }
   function onStop() {
     if (timerRef.current) clearInterval(timerRef.current);
+    setCapSeconds(computeElapsed(accumRef.current, segStartRef.current));
+    segStartRef.current = null;
     const f = fieldsOfTask(effectiveTaskId(capTaskId, capProject));
     setCapFields(f); setCapOrig(f);
     setCapMode('noting');
@@ -450,7 +532,8 @@ export default function Dashboard() {
   function onDiscard() {
     if (timerRef.current) clearInterval(timerRef.current);
     localStorage.removeItem(LIVE_SESSION_KEY);
-    setCapMode('idle'); setCapProject(null); setCapSeconds(0); setCapNote(''); setCapTaskId(null);
+    accumRef.current = 0; segStartRef.current = null;
+    setCapMode('idle'); setCapProject(null); setCapSeconds(0); setCapNote(''); setCapTaskId(null); setCapMarkDone(false);
   }
   // taskId: an explicit task, or null for the project's next step, or 'NEW' to
   // force a fresh stub. Translate that into the log request shape.
@@ -466,14 +549,17 @@ export default function Dashboard() {
     const durSec = capSeconds;
     const taskSel = capTaskId;
     const fDraft = capFields, fOrig = capOrig;
+    const markDone = capMarkDone;
     localStorage.removeItem(LIVE_SESSION_KEY);
+    accumRef.current = 0; segStartRef.current = null;
     setFeed(f => [{ id: '', project: p?.name || '', note, when: 'Just now', dur: fmtDur(durSec), durationSec: durSec }, ...f]);
-    setCapMode('idle'); setCapProject(null); setCapSeconds(0); setCapNote(''); setCapTaskId(null);
+    setCapMode('idle'); setCapProject(null); setCapSeconds(0); setCapNote(''); setCapTaskId(null); setCapMarkDone(false);
     setCapFields(BLANK_FIELDS); setCapOrig(BLANK_FIELDS);
     try {
       const res = await api.logActivity({ projectId: capProject, ...attachment(taskSel), note, durationSec: durSec, source: 'live' });
-      const updates = fieldUpdates(fDraft, fOrig);
+      const updates = fieldUpdates(fDraft, fOrig, statusField?.type === 'select' ? 'select' : 'status');
       if (res?.taskId && updates.length) await api.updateTaskFields(res.taskId, updates);
+      if (res?.taskId && markDone) await api.completeTask(res.taskId);
       setSaveError(null);
       celebrate();
     } catch (e: any) {
@@ -492,7 +578,7 @@ export default function Dashboard() {
     setManDur(''); setManNote('');
     try {
       const res = await api.logActivity({ projectId: manProject, ...attachment(taskSel), note, durationSec: durSec, source: 'manual' });
-      const updates = fieldUpdates(fDraft, fOrig);
+      const updates = fieldUpdates(fDraft, fOrig, statusField?.type === 'select' ? 'select' : 'status');
       if (res?.taskId && updates.length) await api.updateTaskFields(res.taskId, updates);
       setSaveError(null);
       celebrate();
@@ -509,6 +595,21 @@ export default function Dashboard() {
     try { await api.completeTask(id); setSaveError(null); }
     catch (e: any) { setSaveError(`Couldn't complete that task in Notion: ${e.message}`); loadTasks(); }
     loadProjects(); loadFeed(); loadReview();
+  }
+  // Set a task's Notion Status to any option (the dropdown in the task list).
+  // Optimistically reflect the new status name; loadTasks reconciles — a task
+  // moved to a Done status drops off the open list on the next refresh.
+  async function setTaskStatus(taskId: string, optionIds: string[]) {
+    const optId = optionIds[0] ?? null;
+    const name = statusField?.options.find(o => o.id === optId)?.name;
+    setTasks(ts => ts.map(t => t.id === taskId ? { ...t, status: name ?? t.status } : t));
+    try {
+      await api.updateTaskFields(taskId, [{ name: 'Status', type: statusField?.type === 'select' ? 'select' : 'status', optionIds: optId ? [optId] : [] }]);
+      setSaveError(null);
+    } catch (e: any) {
+      setSaveError(`Couldn't update that task's status in Notion: ${e.message}`);
+    }
+    loadTasks(); loadProjects(); loadReview();
   }
   async function addTaskTo(projectId: string) {
     const name = newTaskName.trim();
@@ -634,9 +735,23 @@ export default function Dashboard() {
             </div>
 
             {reorderMsg && (
-              <div style={{ marginTop: '14px', display: 'flex', alignItems: 'center', gap: '8px', background: '#f3ead9', border: '2px solid #e8d7bd', borderRadius: '14px', padding: '9px 13px', animation: 'wf-in .3s ease both' }}>
-                <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: ACCENT }} />
-                <span style={{ fontSize: '12px', color: '#7a5c3e', fontWeight: 700 }}>{reorderMsg}</span>
+              <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '9px', background: '#f3ead9', border: '2px solid #e8d7bd', borderRadius: '14px', padding: '9px 13px', animation: 'wf-in .3s ease both' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: ACCENT, flex: '0 0 auto' }} />
+                  <span style={{ fontSize: '12px', color: '#7a5c3e', fontWeight: 700 }}>{reorderMsg}</span>
+                </div>
+                {reorderOrder && (
+                  <div style={{ display: 'flex', gap: '7px' }}>
+                    <input
+                      value={reorderReason}
+                      onChange={e => setReorderReason(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && submitReorderReason()}
+                      placeholder="Add a reason (optional)…"
+                      style={{ ...input, flex: 1, fontSize: '12px', padding: '7px 10px' }}
+                    />
+                    <div onClick={submitReorderReason} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#a06a2e', background: '#fff', border: '2px solid #e8d7bd', borderRadius: '11px', padding: '7px 13px', whiteSpace: 'nowrap' }}>Add</div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -655,12 +770,14 @@ export default function Dashboard() {
                   cursor: editing ? 'default' : 'grab', transition: 'box-shadow .2s, border-color .2s, background .2s',
                 };
                 return (
-                  <div key={p.id} draggable={!editing}
-                    onDragStart={() => setDragId(p.id)}
-                    onDragOver={e => e.preventDefault()}
-                    onDrop={() => onDrop(p.id)}
-                    onDragEnd={() => setDragId(null)}
-                    style={cardStyle}>
+                  <Fragment key={p.id}>
+                    {dragId && dragOverIndex === i && <div style={dropLineStyle} />}
+                    <div draggable={!editing}
+                      onDragStart={() => setDragId(p.id)}
+                      onDragOver={onDragOverCard(i)}
+                      onDrop={onDrop}
+                      onDragEnd={() => { setDragId(null); setDragOverIndex(null); }}
+                      style={cardStyle}>
                     {!editing ? (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '11px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '13px' }}>
@@ -687,13 +804,21 @@ export default function Dashboard() {
                         {expandedTasks === p.id && (
                           <div style={{ background: '#fbf6ec', border: '2px solid #f0e2cf', borderRadius: '14px', padding: '11px 13px' }}>
                             {tasksFor(p.id).length === 0 && <div style={{ fontSize: '12px', color: '#a8927a', paddingBottom: '4px', fontWeight: 600 }}>No open tasks — add one below.</div>}
-                            {tasksFor(p.id).map(t => (
+                            {tasksFor(p.id).map(t => {
+                              const statusOptId = statusField?.options.find(o => o.name === t.status)?.id ?? null;
+                              return (
                               <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '9px', padding: '5px 0' }}>
                                 <span onClick={() => completeTaskById(t.id)} title="Mark done in Notion" style={{ width: '16px', height: '16px', borderRadius: '5px', border: '2px solid #dcc9ab', cursor: 'pointer', flex: '0 0 auto', background: '#fff' }} />
                                 <span style={{ fontSize: '13px', color: INK, flex: 1, minWidth: 0, fontWeight: 600 }}>{t.name}</span>
                                 {t.isNextStep && <span style={{ fontSize: '9.5px', fontWeight: 800, letterSpacing: '.06em', color: ACCENT, background: ACCENT_SOFT, border: '2px solid #e8d7bd', borderRadius: '20px', padding: '2px 7px', flex: '0 0 auto' }}>NEXT</span>}
+                                {statusField && (
+                                  <div style={{ flex: '0 0 auto', width: '134px' }} onClick={e => e.stopPropagation()}>
+                                    <NotionFieldDropdown field={statusField} value={statusOptId ? [statusOptId] : []} onChange={ids => setTaskStatus(t.id, ids)} />
+                                  </div>
+                                )}
                               </div>
-                            ))}
+                              );
+                            })}
                             <div style={{ display: 'flex', gap: '7px', marginTop: '8px' }}>
                               <input value={newTaskName} onChange={e => setNewTaskName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addTaskTo(p.id)} placeholder="Add a task…" style={{ ...input, fontSize: '12.5px', padding: '7px 10px' }} />
                               <div onClick={() => addTaskTo(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#a06a2e', background: ACCENT_SOFT, border: '2px solid #e8d7bd', borderRadius: '11px', padding: '7px 13px', whiteSpace: 'nowrap' }}>Add</div>
@@ -747,9 +872,11 @@ export default function Dashboard() {
                         </div>
                       </div>
                     )}
-                  </div>
+                    </div>
+                  </Fragment>
                 );
               })}
+              {dragId && dragOverIndex === projects.length && <div style={dropLineStyle} />}
 
               <div onClick={addProject} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, color: ACCENT, border: '2px dashed #e8cdb8', borderRadius: '16px', padding: '12px', marginTop: '2px' }}>+ New building</div>
             </div>
@@ -772,7 +899,14 @@ export default function Dashboard() {
                   <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '11px 14px', borderRadius: '16px', background: '#f6efe1', border: '2px solid #ecdfc8' }}>
                     <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: dot, flex: '0 0 auto', boxShadow: '0 0 0 4px rgba(201,111,78,.12)' }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: '13px', fontWeight: 800, color: INK }}>{c.title}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                        <span style={{ fontSize: '13px', fontWeight: 800, color: INK }}>{c.title}</span>
+                        {c.recurring && (
+                          <svg viewBox="0 0 640 512" width="12" height="12" fill="#a8927a" style={{ flex: '0 0 auto' }} aria-label="repeats">
+                            <path d="M614.2 334.8C610.5 325.8 601.7 320 592 320l-72 0 0-144c0-26.5-21.5-48-48-48l-152 0c-8.8 0-16 7.2-16 16l0 32c0 8.8 7.2 16 16 16l136 0 0 128-72 0c-9.7 0-18.5 5.8-22.2 14.8s-1.7 19.3 5.2 26.2l104 104c9.4 9.4 24.6 9.4 33.9 0l104-104c6.9-6.9 8.9-17.2 5.2-26.2zM32 192c3.7 9 12.5 14.8 22.2 14.8l72 0 0 144c0 26.5 21.5 48 48 48l152 0c8.8 0 16-7.2 16-16l0-32c0-8.8-7.2-16-16-16l-136 0 0-128 72 0c9.7 0 18.5-5.8 22.2-14.8s1.7-19.3-5.2-26.2l-104-104c-9.4-9.4-24.6-9.4-33.9 0l-104 104c-6.9 6.9-8.9 17.2-5.2 26.2z"/>
+                          </svg>
+                        )}
+                      </div>
                       <div style={{ fontSize: '11px', color: INK_SOFT, fontWeight: 600 }}>{c.project} · {c.type}</div>
                     </div>
                     <div style={{ textAlign: 'right', flex: '0 0 auto' }}>
@@ -887,9 +1021,15 @@ export default function Dashboard() {
                     <span style={{ fontSize: '11px', color: '#4d8a5e', fontWeight: 800 }}>the kettle's on</span>
                   </div>
                 )}
+                {capMode === 'paused' && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
+                    <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#d8b45a' }} />
+                    <span style={{ fontSize: '11px', color: '#9a7d38', fontWeight: 800 }}>tea break!</span>
+                  </div>
+                )}
               </div>
 
-              <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 800, fontSize: '46px', letterSpacing: '.01em', color: (capMode === 'running' || capMode === 'noting') ? INK : '#d8c8b2', marginTop: '10px', fontVariantNumeric: 'tabular-nums' }}>{fmtClock(capSeconds)}</div>
+              <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 800, fontSize: '46px', letterSpacing: '.01em', color: (capMode === 'running' || capMode === 'paused' || capMode === 'noting') ? INK : '#d8c8b2', marginTop: '10px', fontVariantNumeric: 'tabular-nums' }}>{fmtClock(capSeconds)}</div>
               <div style={{ fontSize: '12px', color: INK_SOFT, minHeight: '16px', fontWeight: 600 }}>
                 {capMode === 'picking' ? 'Which house are you popping into?' : (capProject && projects.find(p => p.id === capProject)?.name) || 'The whole street is quiet — for now'}
               </div>
@@ -928,8 +1068,15 @@ export default function Dashboard() {
               {capMode === 'idle' && (
                 <div onClick={onStart} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px', borderRadius: '14px', background: ACCENT, color: '#fff', marginTop: '16px', boxShadow: `0 3px 0 ${ACCENT_DARK}` }}>Pop into a building &amp; start the clock</div>
               )}
-              {capMode === 'running' && (
-                <div onClick={onStop} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px', borderRadius: '14px', background: INK, color: '#fff', marginTop: '16px' }}>Stop &amp; tell the tale</div>
+              {(capMode === 'running' || capMode === 'paused') && (
+                <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+                  {capMode === 'running' ? (
+                    <div onClick={onPause} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px 16px', borderRadius: '14px', background: '#fff', border: '2px solid #ecdcc5', color: INK }}>Pause</div>
+                  ) : (
+                    <div onClick={onResume} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px 16px', borderRadius: '14px', background: '#fff', border: `2px solid ${ACCENT}`, color: ACCENT_DARK }}>Resume</div>
+                  )}
+                  <div onClick={onStop} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px', borderRadius: '14px', background: INK, color: '#fff' }}>Stop &amp; tell the tale</div>
+                </div>
               )}
             </div>
 

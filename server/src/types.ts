@@ -117,4 +117,6 @@ export interface CalendarEvent {
   type: 'Deadline' | 'Call' | 'Recurring' | 'Event';
   project: string;
   startISO: string;
+  recurring?: boolean;
+  recurringEventId?: string;
 }

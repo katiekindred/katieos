@@ -96,6 +96,8 @@ export async function fetchUpcomingEvents(projectNames: string[]): Promise<Calen
       type: inferType(ev.summary || '', ''),
       project: matchProject(ev.summary || '', projectNames),
       startISO,
+      recurring: !!ev.recurringEventId,
+      recurringEventId: ev.recurringEventId || undefined,
     };
   });
 }
