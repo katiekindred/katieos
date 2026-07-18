@@ -85,7 +85,24 @@ const input: CSSProperties = {
 const dropLineStyle: CSSProperties = {
   height: '3px', borderRadius: '2px', background: ACCENT, flex: '0 0 auto',
   boxShadow: '0 0 0 4px rgba(201,111,78,.15)',
+  // The indicator must never intercept the drop: HTML5 DnD only fires `drop`
+  // on an element whose dragover called preventDefault, and this line has no
+  // such handler. Without this, releasing over the line silently drops nothing.
+  pointerEvents: 'none',
 };
+
+// Small inline spinner for the "saving to Notion" indicator.
+function Spinner({ size = 13, color = ACCENT }: { size?: number; color?: string }) {
+  return (
+    <span
+      style={{
+        display: 'inline-block', width: `${size}px`, height: `${size}px`, flex: '0 0 auto',
+        border: `2px solid ${color}`, borderTopColor: 'transparent', borderRadius: '50%',
+        animation: 'wf-spin .7s linear infinite',
+      }}
+    />
+  );
+}
 
 const taskChip = (selected: boolean): CSSProperties => ({
   cursor: 'pointer', fontSize: '11.5px', fontWeight: 800, padding: '6px 10px', borderRadius: '10px',
@@ -169,6 +186,9 @@ export default function Dashboard() {
   const [reorderMsg, setReorderMsg] = useState<string | null>(null);
   const [reorderOrder, setReorderOrder] = useState<string[] | null>(null);
   const [reorderReason, setReorderReason] = useState('');
+  // 'saving' while a reorder is in flight to Notion, 'saved' once it lands,
+  // 'error' if it fails. Drives the loading indicator in the toast.
+  const [reorderStatus, setReorderStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ProjectDraft | null>(null);
 
@@ -402,29 +422,40 @@ export default function Dashboard() {
     };
   }
   function onDrop() {
-    if (!dragId || dragOverIndex === null) { setDragId(null); setDragOverIndex(null); return; }
-    const order = projects.map(p => p.id);
-    const from = order.indexOf(dragId);
-    const insertAt = dragOverIndex > from ? dragOverIndex - 1 : dragOverIndex;
+    const id = dragId, over = dragOverIndex;
     setDragId(null);
     setDragOverIndex(null);
+    if (!id || over === null) return;
+    const order = projects.map(p => p.id);
+    const from = order.indexOf(id);
+    const insertAt = over > from ? over - 1 : over;
     if (insertAt === from) return;
     order.splice(from, 1);
-    order.splice(insertAt, 0, dragId);
-    const reordered = order.map(id => projects.find(p => p.id === id)!);
+    order.splice(insertAt, 0, id);
+    const reordered = order.map(pid => projects.find(p => p.id === pid)!);
     setProjects(reordered);
-    const moved = reordered.find(p => p.id === dragId)!;
-    const newRank = order.indexOf(dragId) + 1;
-    setReorderMsg(`${moved.name} moved to #${newRank}. Logged to Notion.`);
+    const moved = reordered.find(p => p.id === id)!;
+    const newRank = order.indexOf(id) + 1;
+    setReorderMsg(`${moved.name} moved to #${newRank}.`);
     setReorderOrder(order);
     setReorderReason('');
-    api.reorder(order, null).catch(() => setReorderMsg('Reorder failed to save — try again.'));
+    saveReorder(order, null);
+  }
+  // Persist an order to Notion, flipping the loading indicator as it goes.
+  function saveReorder(order: string[], reason: string | null) {
+    setReorderStatus('saving');
+    api.reorder(order, reason)
+      .then(() => setReorderStatus('saved'))
+      .catch(() => {
+        setReorderStatus('error');
+        setReorderMsg('Reorder failed to save — try again.');
+      });
   }
   function submitReorderReason() {
     const reason = reorderReason.trim();
     if (!reason || !reorderOrder) return;
-    api.reorder(reorderOrder, reason).catch(() => setReorderMsg('Reorder failed to save — try again.'));
-    setReorderMsg(prev => (prev ? prev.replace(/Logged to Notion\.?$/, 'Logged to Notion with your reason.') : prev));
+    saveReorder(reorderOrder, reason);
+    setReorderMsg(prev => (prev ? `${prev.replace(/\s*Saved with your reason\.?$/, '')} Saved with your reason.` : prev));
     setReorderOrder(null);
     setReorderReason('');
   }
@@ -738,8 +769,13 @@ export default function Dashboard() {
             {reorderMsg && (
               <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '9px', background: '#f3ead9', border: '2px solid #e8d7bd', borderRadius: '14px', padding: '9px 13px', animation: 'wf-in .3s ease both' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: ACCENT, flex: '0 0 auto' }} />
+                  {reorderStatus === 'saving'
+                    ? <Spinner size={12} />
+                    : <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: reorderStatus === 'error' ? '#b4453b' : ACCENT, flex: '0 0 auto' }} />}
                   <span style={{ fontSize: '12px', color: '#7a5c3e', fontWeight: 700 }}>{reorderMsg}</span>
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: reorderStatus === 'error' ? '#b4453b' : '#a8927a', whiteSpace: 'nowrap' }}>
+                    {reorderStatus === 'saving' ? 'Saving to Notion…' : reorderStatus === 'saved' ? '✓ Saved to Notion' : ''}
+                  </span>
                 </div>
                 {reorderOrder && (
                   <div style={{ display: 'flex', gap: '7px' }}>
@@ -756,7 +792,11 @@ export default function Dashboard() {
               </div>
             )}
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '16px' }}>
+            <div
+              onDragOver={e => { if (dragId) e.preventDefault(); }}
+              onDrop={onDrop}
+              style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '16px' }}
+            >
               {projects.map((p, i) => {
                 const dragging = dragId === p.id;
                 const editing = editingId === p.id;
@@ -776,7 +816,6 @@ export default function Dashboard() {
                     <div draggable={!editing}
                       onDragStart={() => setDragId(p.id)}
                       onDragOver={onDragOverCard(i)}
-                      onDrop={onDrop}
                       onDragEnd={() => { setDragId(null); setDragOverIndex(null); }}
                       style={cardStyle}>
                     {!editing ? (
