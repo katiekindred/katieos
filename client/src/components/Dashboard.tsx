@@ -575,8 +575,16 @@ export default function Dashboard() {
     const priority = projects.length + 1;
     try {
       const { id } = await api.createProject('New building', priority);
-      await loadProjects();
-      startEdit({ id, name: 'New building', blurb: '', threshold: '2 weeks', nextStep: '', houseColor: null } as Project);
+      const newProject: Project = {
+        id, name: 'New building', blurb: '', status: 'Active',
+        lastMoved: '—', lastMovedAt: null, threshold: '2 weeks',
+        sessions: '0 logged', note: '', nextStep: '', nextNote: '', nextTarget: '',
+        priority, activity: 0, recentSessions: 0, totalHours: 0, stature: 0.1,
+        trend: 'fading', quiet: true, week: [false, false, false, false, false, false, false],
+        hours: 0, recoveryNote: null, houseColor: null,
+      };
+      setProjects(ps => [...ps, newProject]);
+      startEdit(newProject);
     } catch (e: any) {
       setSaveError(`Couldn't create a building in Notion: ${e.message}`);
     }

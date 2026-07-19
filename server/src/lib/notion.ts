@@ -717,6 +717,42 @@ export async function createProject(fields: { name: string; priority: number }) 
       'Check-in threshold': { rich_text: [{ text: { content: '2 weeks' } }] },
     },
   });
-  bustCache();
+  // A brand-new project has no tasks yet, so every one of its stats is a
+  // deterministic zero — patch the live cache instead of nuking it, so the
+  // next poll doesn't pay for a full activity-log rebuild just to show an
+  // empty house.
+  if (projectsCache) {
+    const threshold = '2 weeks';
+    const thresholdDays = parseThresholdDays(threshold);
+    const projectLog = projectsCache.data.log.filter(e => e.projectId === page.id);
+    const totalHours = computeTotalHours(projectLog);
+    projectsCache.data.projects.push({
+      id: page.id,
+      name: fields.name,
+      blurb: '',
+      status: 'Active',
+      lastMoved: humanizeLastMoved(null),
+      lastMovedAt: null,
+      threshold,
+      sessions: `${projectLog.length} logged`,
+      note: '',
+      nextStep: '',
+      nextNote: '',
+      nextTarget: '',
+      priority: fields.priority,
+      activity: computeActivity(projectLog),
+      recentSessions: countRecentSessions(projectLog),
+      totalHours,
+      stature: computeStature(totalHours),
+      trend: computeTrend(projectLog),
+      quiet: computeQuiet(null, thresholdDays),
+      week: computeWeek(projectsCache.data.log, page.id),
+      hours: computeHoursThisWeek(projectsCache.data.log, page.id),
+      recoveryNote: findRecovery(projectsCache.data.log, page.id, thresholdDays)?.note ?? null,
+      houseColor: null,
+    });
+  } else {
+    bustCache();
+  }
   return page.id;
 }
