@@ -181,10 +181,14 @@ interface TaskRow {
   lastEditedTime: string | null;
 }
 
+let tasksCache: { at: number; data: TaskRow[] } | null = null;
+const TASKS_TTL_MS = 15000; // matches PROJECTS_TTL_MS — one scan serves a whole client refresh burst
+
 async function fetchAllTasks(): Promise<TaskRow[]> {
+  if (tasksCache && Date.now() - tasksCache.at < TASKS_TTL_MS) return tasksCache.data;
   await ensureSchema();
   const rows = await queryAll(TASKS_DB());
-  return rows.map((page: any) => {
+  const data = rows.map((page: any) => {
     const props = page.properties;
     const projectIds = relationIds(props['Project']);
     return {
@@ -204,6 +208,8 @@ async function fetchAllTasks(): Promise<TaskRow[]> {
       lastEditedTime: page.last_edited_time ?? null,
     };
   });
+  tasksCache = { at: Date.now(), data };
+  return data;
 }
 
 // "Last visited" is driven purely by task activity in Notion: the most recently
@@ -258,17 +264,40 @@ async function readSessionBlocks(taskId: string) {
   return out;
 }
 
+// Run `fn` over items with at most `limit` in flight — Notion 429s on bursts.
+async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  }));
+  return results;
+}
+
+const RECENT_DONE_DAYS = 60;
+
 // The activity log that lights the skyline. Each logged *session* (a body line
 // on an open, in-progress task) is one dated entry, so live work shows on the
 // day it happened. A completed task instead contributes a single entry on its
 // completion date carrying its total time — which also covers legacy per-session
-// rows and tasks finished by hand. Only open, app-touched tasks have their page
-// bodies read, keeping Notion calls proportional to what's currently in flight.
+// rows and tasks finished by hand. Open tasks AND recently-completed app-touched
+// tasks (within RECENT_DONE_DAYS) have their page bodies read, so finishing a
+// task doesn't retroactively collapse its per-day sessions into one entry on
+// the completion date and shrink streaks/week dots/hours; the single
+// completion-date entry remains the fallback for tasks with no session lines.
 async function buildActivityLog(tasks: TaskRow[]): Promise<ActivityLogEntry[]> {
-  const openTouched = tasks.filter(t =>
-    t.projectId && !DONE_STATUSES.has(t.status) && ((t.durationMin ?? 0) > 0 || t.source === 'Live' || t.source === 'Manual'));
-  const sessionArrays = await Promise.all(openTouched.map(t => readSessionBlocks(t.id)));
-  const sessionsByTask = new Map(openTouched.map((t, i) => [t.id, sessionArrays[i]]));
+  const touched = tasks.filter(t => {
+    if (!t.projectId) return false;
+    const appTouched = (t.durationMin ?? 0) > 0 || t.source === 'Live' || t.source === 'Manual';
+    if (!appTouched) return false;
+    if (!DONE_STATUSES.has(t.status)) return true;
+    return !!t.dateCompleted && centralDaysAgo(t.dateCompleted) <= RECENT_DONE_DAYS;
+  });
+  const sessionArrays = await mapPool(touched, 4, t => readSessionBlocks(t.id));
+  const sessionsByTask = new Map(touched.map((t, i) => [t.id, sessionArrays[i]]));
 
   const log: ActivityLogEntry[] = [];
   for (const t of tasks) {
@@ -322,7 +351,7 @@ function pickNextStep(tasks: TaskRow[], projectId: string): { step: string; note
 // the cache so the next read is fresh.
 let projectsCache: { at: number; data: { projects: Project[]; log: ActivityLogEntry[] } } | null = null;
 const PROJECTS_TTL_MS = 15000;
-function bustCache() { projectsCache = null; }
+function bustCache() { projectsCache = null; tasksCache = null; }
 
 export async function fetchProjects(): Promise<{ projects: Project[]; log: ActivityLogEntry[] }> {
   if (!isConfigured()) return { projects: [], log: [] };
@@ -352,6 +381,7 @@ export async function fetchProjects(): Promise<{ projects: Project[]; log: Activ
     const quiet = computeQuiet(lastMovedAt, thresholdDays);
     const nextOverride = text(props['Next Step Override']);
     const next = pickNextStep(tasks, page.id);
+    const totalHours = computeTotalHours(projectLog);
 
     return {
       id: page.id,
@@ -369,8 +399,8 @@ export async function fetchProjects(): Promise<{ projects: Project[]; log: Activ
       priority: num(props['Priority']) ?? i + 1,
       activity,
       recentSessions: countRecentSessions(projectLog),
-      totalHours: computeTotalHours(projectLog),
-      stature: computeStature(computeTotalHours(projectLog)),
+      totalHours,
+      stature: computeStature(totalHours),
       trend: computeTrend(projectLog),
       quiet,
       week: computeWeek(log, page.id),

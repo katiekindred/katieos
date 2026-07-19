@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { memo, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import type { Project, Trend, Weather } from '../types';
 import { colorsFor, type HouseShades } from './houseColors';
 import { flavorForTime, themeFor, type Flavor } from './skylineTheme';
@@ -16,10 +16,11 @@ interface SkylineProps {
 
 interface Building {
   id: string; name: string; rank: number; lastMoved: string;
-  sessions: string; threshold: string; note: string; totalHours: number;
+  threshold: string; note: string; totalHours: number;
   h: number; w: number; recentSessions: number; trend: Trend;
   quiet: boolean; showCheckin: boolean; checkinText: string;
   colors: HouseShades; trendWord: 'buzzing' | 'steady' | 'napping';
+  recoveryNote: string | null;
 }
 
 // One lit window per session worked in the past month; dark if none.
@@ -81,7 +82,13 @@ function HouseWeather({ quiet, rising }: { quiet: boolean; rising: boolean }) {
 
 const cssVars = (vars: Record<string, string>) => vars as CSSProperties;
 
-export default function Skyline({ projects, onRequestReorder, truthOverride, energyWeather = 'clear' }: SkylineProps) {
+// Shared keyboard handler for role="button" elements (Enter/Space activate,
+// Space is prevented from scrolling the page).
+const keyActivate = (fn: () => void) => (e: React.KeyboardEvent) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); }
+};
+
+function Skyline({ projects, onRequestReorder, truthOverride, energyWeather = 'clear' }: SkylineProps) {
   const [weatherOn, setWeatherOn] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checkin, setCheckin] = useState<string | null>(null);
@@ -92,6 +99,16 @@ export default function Skyline({ projects, onRequestReorder, truthOverride, ene
     const t = setInterval(() => setNow(new Date()), 15000);
     return () => clearInterval(t);
   }, []);
+
+  // Escape closes the building popover, same as clicking the × or "Back to the city".
+  useEffect(() => {
+    if (selectedId === null) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { setSelectedId(null); setCheckin(null); }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [selectedId]);
 
   const flavor = override || flavorForTime(now);
   const isAuto = !override;
@@ -123,12 +140,13 @@ export default function Skyline({ projects, onRequestReorder, truthOverride, ene
     const w = Math.round(84 + p.stature * 24);
     return {
       id: p.id, name: p.name, rank: i + 1, lastMoved: p.lastMoved,
-      sessions: p.sessions, threshold: p.threshold, note: p.note, totalHours: p.totalHours,
+      threshold: p.threshold, note: p.note, totalHours: p.totalHours,
       h, w, recentSessions: p.recentSessions, trend: p.trend,
       quiet: p.quiet, showCheckin: p.quiet,
       checkinText: i === 0 ? 'This hasn’t moved in a while — still your #1?' : 'This has been quiet — still a priority?',
       colors: colorsFor(p.houseColor, p.id),
       trendWord: trendWord(p),
+      recoveryNote: p.recoveryNote,
     };
   }), [projects]);
 
@@ -185,23 +203,23 @@ export default function Skyline({ projects, onRequestReorder, truthOverride, ene
               {modes.map(m => {
                 const active = m.key === 'auto' ? isAuto : override === m.key;
                 return (
-                  <div key={m.key} onClick={() => setOverride(m.key === 'auto' ? null : m.key)} style={{
+                  <button type="button" key={m.key} onClick={() => setOverride(m.key === 'auto' ? null : m.key)} aria-pressed={active} style={{
                     cursor: 'pointer', fontSize: '11.5px', fontWeight: 800, padding: '5px 13px', borderRadius: '11px',
                     background: active ? 'var(--accent)' : 'transparent',
                     color: active ? '#ffffff' : 'var(--ink-soft)', transition: 'background .2s, color .2s', whiteSpace: 'nowrap',
-                  }}>{m.label}</div>
+                  }}>{m.label}</button>
                 );
               })}
             </div>
           </div>
         </div>
-        <div onClick={() => setWeatherOn(v => !v)} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '11px', padding: '10px 14px', borderRadius: '18px', border: '2px solid var(--stroke)', background: 'var(--card)' }}>
+        <button type="button" onClick={() => setWeatherOn(v => !v)} aria-pressed={weatherOn} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '11px', padding: '10px 14px', borderRadius: '18px', border: '2px solid var(--stroke)', background: 'var(--card)' }}>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: '12.5px', fontWeight: 800, color: 'var(--ink)' }}>Momentum weather</div>
             <div style={{ fontSize: '10.5px', color: 'var(--ink-soft)', fontWeight: 600 }}>rain over sleepy houses, sparkles on busy ones</div>
           </div>
           <div style={trackStyle}><div style={knobStyle} /></div>
-        </div>
+        </button>
       </div>
 
       <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
@@ -209,7 +227,13 @@ export default function Skyline({ projects, onRequestReorder, truthOverride, ene
           {buildings.map(b => (
             <div key={b.id} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', width: Math.max(b.w, 116) + 'px' }}>
               {weatherOn && <HouseWeather quiet={b.quiet} rising={b.trend === 'rising' && !b.quiet} />}
-              <div onClick={() => { setSelectedId(b.id); setCheckin(null); }} style={{
+              <div
+                role="button"
+                tabIndex={0}
+                aria-label={`Open the ${b.name} house`}
+                onClick={() => { setSelectedId(b.id); setCheckin(null); }}
+                onKeyDown={keyActivate(() => { setSelectedId(b.id); setCheckin(null); })}
+                style={{
                 position: 'relative', zIndex: 5, width: b.w + 'px', height: b.h + 'px', cursor: 'pointer',
                 borderRadius: '10px 10px 0 0', background: b.colors.body,
                 boxShadow: 'inset 0 0 0 2px rgba(70,50,30,.10), 0 -4px 30px rgba(60,40,20,.10)',
@@ -239,7 +263,7 @@ export default function Skyline({ projects, onRequestReorder, truthOverride, ene
           <div style={{ position: 'absolute', top: '86px', right: '24px', zIndex: 9, width: '272px', background: 'var(--card)', border: '2px solid var(--card-bd)', borderRadius: '20px', padding: '17px 18px', backdropFilter: 'blur(12px)', boxShadow: '0 16px 40px rgba(50,30,10,.25)', animation: 'wf-rise .3s ease both' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '10px' }}>
               <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontWeight: 800, fontSize: '17px', color: 'var(--ink)' }}>{sel.name}</div>
-              <div onClick={() => { setSelectedId(null); setCheckin(null); }} title="Back to the city" style={{ cursor: 'pointer', color: 'var(--ink-soft)', fontSize: '16px', lineHeight: 1, padding: '2px 4px' }}>×</div>
+              <button type="button" onClick={() => { setSelectedId(null); setCheckin(null); }} title="Back to the city" aria-label="Back to the city" style={{ cursor: 'pointer', color: 'var(--ink-soft)', fontSize: '16px', lineHeight: 1, padding: '2px 4px' }}>×</button>
             </div>
             <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontWeight: 400, fontStyle: 'italic', fontSize: '13.5px', lineHeight: 1.4, color: 'var(--ink)', opacity: 0.9, marginTop: '4px' }}>{detailLine}</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '7px', marginTop: '12px' }}>
@@ -256,15 +280,21 @@ export default function Skyline({ projects, onRequestReorder, truthOverride, ene
                 <div style={{ fontSize: '12.5px', color: 'var(--ink)', lineHeight: 1.4, fontWeight: 600 }}>{sel.checkinText}</div>
                 {!checkin ? (
                   <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
-                    <div onClick={() => setCheckin('Kept at #' + sel.rank + '.')} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '12px', fontWeight: 800, padding: '8px', borderRadius: '11px', background: 'var(--accent)', color: '#fff' }}>Yes, keep it</div>
-                    <div onClick={() => { setCheckin('Opening priority view to reorder…'); onRequestReorder?.(); }} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '12px', fontWeight: 800, padding: '8px', borderRadius: '11px', background: 'transparent', border: '2px solid var(--stroke)', color: 'var(--ink)' }}>Reorder</div>
+                    <button type="button" onClick={() => setCheckin('Kept at #' + sel.rank + '.')} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '12px', fontWeight: 800, padding: '8px', borderRadius: '11px', background: 'var(--accent)', color: '#fff' }}>Yes, keep it</button>
+                    <button type="button" onClick={() => { setCheckin('Opening priority view to reorder…'); onRequestReorder?.(); }} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '12px', fontWeight: 800, padding: '8px', borderRadius: '11px', background: 'transparent', border: '2px solid var(--stroke)', color: 'var(--ink)' }}>Reorder</button>
                   </div>
                 ) : (
                   <div style={{ fontSize: '12px', color: 'var(--ink)', marginTop: '10px', display: 'flex', alignItems: 'center', gap: '7px', fontWeight: 600 }}><span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--accent)' }} />{checkin}</div>
                 )}
+                {/* memory, not instruction — pulled from Katie's own logged activity (findRecovery) */}
+                {sel.recoveryNote && (
+                  <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontStyle: 'italic', fontSize: '12.5px', lineHeight: 1.45, color: 'var(--ink)', opacity: 0.85, marginTop: '10px', paddingTop: '9px', borderTop: '2px dashed var(--stroke)' }}>
+                    Last time this house sat dark this long, “{sel.recoveryNote}” lit the windows again.
+                  </div>
+                )}
               </div>
             )}
-            <div onClick={() => { setSelectedId(null); setCheckin(null); }} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '11.5px', fontWeight: 800, color: 'var(--accent)', marginTop: '13px' }}>← Back to the city</div>
+            <button type="button" onClick={() => { setSelectedId(null); setCheckin(null); }} style={{ display: 'block', width: '100%', cursor: 'pointer', textAlign: 'center', fontSize: '11.5px', fontWeight: 800, color: 'var(--accent)', marginTop: '13px' }}>← Back to the city</button>
           </div>
         )}
       </div>
@@ -286,4 +316,7 @@ export default function Skyline({ projects, onRequestReorder, truthOverride, ene
     </div>
   );
 }
-// above (like line 236) is the text below the skyline that explains what the skyline is showing, and the legend for the symbols.
+
+// The Dashboard re-renders every second while the live session timer runs;
+// Skyline's ~200 animated ambience nodes must not re-render along with it.
+export default memo(Skyline);

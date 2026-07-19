@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ActivityLogEntry } from '../types.js';
 import {
-  centralDaysAgo, computeStature, computeSummary, computeWeeklyReview, formatSessionLine,
+  centralDaysAgo, computeHoursThisWeek, computeStature, computeSummary, computeWeeklyReview, formatSessionLine,
   parseSessionLine, parseThresholdDays,
 } from './derive.js';
 
@@ -105,6 +105,30 @@ test('computeWeeklyReview compares equal week-to-date slices, not full prior wee
   assert.equal(r.byProject[0].delta, 0.5); // rising by half an hour, not down 1.5h
 });
 
+test('computeWeeklyReview typicalHoursWeekToDate is the median week-to-date slice of prior weeks', () => {
+  const now = Date.parse('2026-07-08T12:00:00Z'); // Wed Jul 8; slice = Mon..Wed
+  const DAY = 24 * 60 * 60 * 1000;
+  const mk = (daysAgo: number, mins: number): ActivityLogEntry => ({
+    id: `p1-${daysAgo}`, projectId: 'p1', startedAt: null, endedAt: null,
+    durationSec: mins * 60, note: 'x', source: 'live', createdAt: new Date(now - daysAgo * DAY).toISOString(),
+  });
+  const log = [
+    mk(0, 60),   // this week (Wed Jul 8): 1h — not part of the baseline
+    mk(9, 60),   // last week Mon Jun 29 → w=1 slice: 1h
+    mk(16, 120), // two weeks back Mon Jun 22 → w=2 slice: 2h
+    mk(23, 240), // three weeks back Mon Jun 15 → w=3 slice: 4h
+    // w=4 (Jun 8-14) has no activity at all → skipped
+  ];
+  const r = computeWeeklyReview(log, [{ id: 'p1', name: 'Guitar', quiet: false }], now);
+  assert.equal(r.typicalHoursWeekToDate, 2); // median of [1, 2, 4]
+});
+
+test('computeWeeklyReview typicalHoursWeekToDate is 0 with no history', () => {
+  const now = Date.parse('2026-07-08T12:00:00Z');
+  const r = computeWeeklyReview([], [{ id: 'p1', name: 'Guitar', quiet: false }], now);
+  assert.equal(r.typicalHoursWeekToDate, 0);
+});
+
 test('computeSummary derives streak/hours/visits from the activity log', () => {
   const now = Date.parse('2026-07-07T12:00:00Z');
   const DAY = 24 * 60 * 60 * 1000;
@@ -145,4 +169,15 @@ test('hoursThisWeek is a Central week-to-date starting Monday', () => {
   const monEarly = mk('b', '2026-07-06T06:00:00Z', 30); // Mon Jul 6, 01:00 CDT
   const s = computeSummary([sunNight, monEarly], now);
   assert.equal(s.hoursThisWeek, 0.5); // only Monday's 30m falls in the current week
+});
+
+test('computeHoursThisWeek is the Central Monday-start week-to-date, not a rolling 7 days', () => {
+  const now = Date.parse('2026-07-08T12:00:00Z'); // Wed Jul 8, 07:00 CDT; week began Mon Jul 6
+  const mk = (id: string, iso: string, mins: number): ActivityLogEntry => ({
+    id, projectId: 'p1', startedAt: null, endedAt: null,
+    durationSec: mins * 60, note: 'x', source: 'live', createdAt: iso,
+  });
+  const sun = mk('a', '2026-07-05T18:00:00Z', 60); // Sun Jul 5 — inside a rolling 7d, outside the Mon-start week
+  const tue = mk('b', '2026-07-07T18:00:00Z', 30); // Tue Jul 7 — this week
+  assert.equal(computeHoursThisWeek([sun, tue], 'p1', now), 0.5);
 });

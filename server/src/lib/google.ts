@@ -66,7 +66,17 @@ function inferType(summary: string, calendarSummary: string): CalendarEvent['typ
   return 'Event';
 }
 
+// Fetched events are cached briefly: /api/calendar and /api/energy/forecast
+// both poll every 60s and would otherwise double the Google API traffic for
+// the same data. Keyed by the joined project names since matchProject depends
+// on them.
+let eventsCache: { at: number; key: string; events: CalendarEvent[] } | null = null;
+const EVENTS_TTL_MS = 2 * 60 * 1000;
+
 export async function fetchUpcomingEvents(projectNames: string[]): Promise<CalendarEvent[]> {
+  const key = projectNames.join('|');
+  if (eventsCache && eventsCache.key === key && Date.now() - eventsCache.at < EVENTS_TTL_MS) return eventsCache.events;
+
   const client = authorizedClient();
   const calendar = google.calendar({ version: 'v3', auth: client });
   const now = new Date();
@@ -80,10 +90,13 @@ export async function fetchUpcomingEvents(projectNames: string[]): Promise<Calen
     maxResults: 25,
   });
 
-  return (res.data.items || []).map(ev => {
-    const startISO = ev.start?.dateTime || ev.start?.date || now.toISOString();
-    const start = new Date(startISO);
+  const events = (res.data.items || []).map(ev => {
     const hasTime = !!ev.start?.dateTime;
+    const rawStart = ev.start?.dateTime || ev.start?.date || now.toISOString();
+    // Date-only starts ("2026-07-19") must be read as *local* dates — new Date()
+    // alone parses them as UTC midnight, which renders a day early in Central time.
+    const start = hasTime ? new Date(rawStart) : new Date(`${rawStart}T00:00:00`);
+    const startISO = start.toISOString();
     const dateStr = start.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
     const timeStr = hasTime ? start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
     const daysOut = Math.round((new Date(start).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86400000);
@@ -100,4 +113,7 @@ export async function fetchUpcomingEvents(projectNames: string[]): Promise<Calen
       recurringEventId: ev.recurringEventId || undefined,
     };
   });
+
+  eventsCache = { at: Date.now(), key, events };
+  return events;
 }

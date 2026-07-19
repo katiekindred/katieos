@@ -32,20 +32,6 @@ export const NOTION_CHIP_TEXT: Record<string, string> = {
   red:     'rgb(93, 23, 21)',
 };
 
-// Solid dot color, for a leading color dot instead of a filled chip.
-export const NOTION_DOT: Record<string, string> = {
-  default: 'rgb(85, 83, 78)',
-  gray:    'rgb(166, 162, 153)',
-  brown:   'rgb(159, 107, 83)',
-  orange:  'rgb(217, 115, 13)',
-  yellow:  'rgb(203, 145, 47)',
-  green:   'rgb(68, 131, 97)',
-  blue:    'rgb(51, 126, 169)',
-  purple:  'rgb(144, 101, 176)',
-  pink:    'rgb(193, 76, 138)',
-  red:     'rgb(212, 76, 71)',
-};
-
 export const chipStyle = (color = 'default'): CSSProperties => ({
   backgroundColor: NOTION_CHIP_BG[color] ?? NOTION_CHIP_BG.default,
   color: NOTION_CHIP_TEXT[color] ?? NOTION_CHIP_TEXT.default,

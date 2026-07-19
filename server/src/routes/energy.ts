@@ -61,7 +61,7 @@ energyRouter.get('/forecast', async (_req, res) => {
   }
 
   const energyLog = await fetchEnergyLog();
-  res.json(computeEnergyForecast({
+  const forecast = computeEnergyForecast({
     energyLog,
     review,
     summary,
@@ -70,5 +70,8 @@ energyRouter.get('/forecast', async (_req, res) => {
     visibleProjectCount: projects.length,
     calendarEventCountNext7d,
     checkinEnabled: isEnergyConfigured(),
-  }));
+  });
+  // The client's "On the horizon" card shows this count so the heavy-calendar
+  // signal (HEAVY_CALENDAR_EVENTS) is visible before it ever fires as a reason.
+  res.json({ ...forecast, calendarEventCountNext7d });
 });

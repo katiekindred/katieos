@@ -99,6 +99,9 @@ export interface WeeklyReview {
   rising: string[];
   fading: string[];
   wentDark: string[];
+  // Median hours over the same week-to-date slice of the 4 prior weeks (weeks
+  // with no activity at all are skipped); 0 when there's no history yet.
+  typicalHoursWeekToDate: number;
 }
 
 export interface ReorderEvent {

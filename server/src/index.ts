@@ -25,5 +25,14 @@ app.use('/api/auth', authRouter);
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
+// Express 5 forwards async route rejections here instead of crashing the
+// process, but the default handler replies with an HTML page — surface the
+// real error message as JSON so the client's error toasts show it. The unused
+// `_next` param is required: Express tells error middleware apart by arity.
+app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error(err);
+  res.status(500).json({ error: err?.message || 'Internal server error' });
+});
+
 const port = Number(process.env.PORT) || 4000;
 app.listen(port, () => console.log(`Life OS server listening on http://localhost:${port}`));

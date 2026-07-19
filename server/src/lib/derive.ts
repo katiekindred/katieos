@@ -59,7 +59,7 @@ function entriesSince(entries: ActivityLogEntry[], days: number): ActivityLogEnt
 // A project with no sessions this month is exactly 0 — its windows go dark.
 export function computeActivity(entries: ActivityLogEntry[]): number {
   const sessionCount = entriesSince(entries, 30).length;
-  return Math.min(1, Math.round((sessionCount / 10) * 100) / 100);
+  return Math.min(1, sessionCount / 10);
 }
 
 // Sessions logged in the last 30 days — drives how many windows are lit.
@@ -96,29 +96,26 @@ export function computeStature(totalHours: number): number {
   return Math.max(0.1, Math.min(1, Math.log10(1 + totalHours) / Math.log10(201)));
 }
 
-export function computeWeek(entries: ActivityLogEntry[], projectId: string): boolean[] {
-  const days: boolean[] = [];
-  for (let i = 6; i >= 0; i--) {
-    const dayStart = new Date();
-    dayStart.setHours(0, 0, 0, 0);
-    dayStart.setDate(dayStart.getDate() - i);
-    const dayEnd = new Date(dayStart.getTime() + DAY_MS);
-    const touched = entries.some(e => {
-      if (e.projectId !== projectId) return false;
-      const t = new Date(e.createdAt).getTime();
-      return t >= dayStart.getTime() && t < dayEnd.getTime();
-    });
-    days.push(touched);
+// The last 7 Central calendar days (oldest first, today last) with whether the
+// project was touched on each — reckoned against the Central calendar like
+// every other stat here, not server-local midnight.
+export function computeWeek(entries: ActivityLogEntry[], projectId: string, now: number = Date.now()): boolean[] {
+  const { anchorNoon } = centralWeekWindows(now);
+  const touched = new Set<string>();
+  for (const e of entries) {
+    if (e.projectId === projectId) touched.add(centralDayKey(new Date(e.createdAt).getTime()));
   }
+  const days: boolean[] = [];
+  for (let i = 6; i >= 0; i--) days.push(touched.has(centralDayKey(anchorNoon - i * DAY_MS)));
   return days;
 }
 
-export function computeHoursThisWeek(entries: ActivityLogEntry[], projectId: string): number {
-  const weekAgo = Date.now() - 7 * DAY_MS;
-  const secs = entries
-    .filter(e => e.projectId === projectId && new Date(e.createdAt).getTime() >= weekAgo)
-    .reduce((sum, e) => sum + (e.durationSec || 0), 0);
-  return Math.round((secs / 3600) * 10) / 10;
+// Hours logged so far this Central Monday-start week (week-to-date), matching
+// computeSummary — not a rolling 7 days — so the project card agrees with the
+// header sticker and weekly review.
+export function computeHoursThisWeek(entries: ActivityLogEntry[], projectId: string, now: number = Date.now()): number {
+  const { thisWeekDays } = centralWeekWindows(now);
+  return hoursOnDays(entries.filter(e => e.projectId === projectId), thisWeekDays);
 }
 
 export interface Recovery { note: string; gapDays: number }
@@ -145,16 +142,12 @@ export function findRecovery(entries: ActivityLogEntry[], projectId: string, thr
 }
 
 export function humanizeWhen(iso: string): string {
-  const then = new Date(iso);
-  const now = new Date();
-  const sameDay = then.toDateString() === now.toDateString();
-  const time = then.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  if (sameDay) return `Today · ${time}`;
-  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
-  if (then.toDateString() === yesterday.toDateString()) return `Yesterday · ${time}`;
-  const days = Math.floor((now.getTime() - then.getTime()) / DAY_MS);
-  if (days < 7) return then.toLocaleDateString([], { weekday: 'long' });
-  return then.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const time = new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: CENTRAL_TZ });
+  const days = centralDaysAgo(iso);
+  if (days <= 0) return `Today · ${time}`;
+  if (days === 1) return `Yesterday · ${time}`;
+  if (days < 7) return new Date(iso).toLocaleDateString('en-US', { weekday: 'long', timeZone: CENTRAL_TZ });
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: CENTRAL_TZ });
 }
 
 export function formatDuration(sec: number): string {
@@ -327,8 +320,7 @@ export function computeWeeklyReview(
   // Central calendar weeks (Monday-start): this week is Monday-to-today; last
   // week is the same-length week-to-date slice of the prior week, so the two are
   // always compared over an equal number of days.
-  const { thisWeekDays, lastWeekDays } = centralWeekWindows(now);
-  const nameById = new Map(projects.map(p => [p.id, p.name]));
+  const { thisWeekDays, lastWeekDays, anchorNoon, daysSinceMonday } = centralWeekWindows(now);
 
   const byProject = projects.map(p => {
     const entries = log.filter(e => e.projectId === p.id);
@@ -362,7 +354,28 @@ export function computeWeeklyReview(
   const fading = byProject.filter(p => p.hoursLastWeek > 0 && p.delta < 0).sort((a, b) => a.delta - b.delta).map(p => p.name);
   const wentDark = projects
     .filter(p => p.quiet && log.some(e => e.projectId === p.id))
-    .map(p => nameById.get(p.id) || p.name);
+    .map(p => p.name);
+
+  // "Typical" pace: the median of the same Monday-through-today slice over the 4
+  // prior weeks. Weeks with no logged activity at all (their FULL 7 days) are
+  // skipped so a vacation or the pre-app era doesn't drag the baseline to zero.
+  const priorSlices: number[] = [];
+  for (let w = 1; w <= 4; w++) {
+    const fullWeek = new Set<string>();
+    // For w=1, d=1..7 gives last Sunday back through last Monday — exactly last
+    // calendar week (e.g. today = Wed Jul 8: offsets daysSinceMonday+1..+7 =
+    // 3..9 days back = Sun Jul 5 .. Mon Jun 29). Each subsequent w shifts the
+    // whole 7-day block back another 7 days.
+    for (let d = 1; d <= 7; d++) fullWeek.add(centralDayKey(anchorNoon - (daysSinceMonday + (w - 1) * 7 + d) * DAY_MS));
+    if (hoursOnDays(log, fullWeek) === 0) continue;
+    const slice = new Set<string>();
+    for (let i = w * 7; i <= daysSinceMonday + w * 7; i++) slice.add(centralDayKey(anchorNoon - i * DAY_MS));
+    priorSlices.push(hoursOnDays(log, slice));
+  }
+  priorSlices.sort((a, b) => a - b);
+  const mid = priorSlices.length / 2;
+  const typicalHoursWeekToDate = priorSlices.length === 0 ? 0
+    : Math.round((priorSlices.length % 2 ? priorSlices[Math.floor(mid)] : (priorSlices[mid - 1] + priorSlices[mid]) / 2) * 10) / 10;
 
   return {
     totalHoursThisWeek: hoursOnDays(log, thisWeekDays),
@@ -376,6 +389,7 @@ export function computeWeeklyReview(
     rising,
     fading,
     wentDark,
+    typicalHoursWeekToDate,
   };
 }
 

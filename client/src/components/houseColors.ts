@@ -70,10 +70,6 @@ export function deriveShades(hex: string): HouseShades {
   return { body: norm.toLowerCase(), shade: rgbToHex(shade.r, shade.g, shade.b), door: rgbToHex(door.r, door.g, door.b) };
 }
 
-export function stockHexForIndex(i: number): string {
-  return HOUSE_COLORS[((i % HOUSE_COLORS.length) + HOUSE_COLORS.length) % HOUSE_COLORS.length].body;
-}
-
 // A stable fallback swatch for a project with no houseColor yet, hashed from
 // its id so it doesn't shift between reloads.
 function hashIndex(id: string): number {

@@ -14,7 +14,6 @@ body { margin: 0; background: #f2e0c8; font-family: 'Nunito', system-ui, sans-se
 @keyframes wf-drop { 0%{transform:translateY(0);opacity:.9} 80%{opacity:.7} 100%{transform:translateY(26px);opacity:0} }
 @keyframes wf-firefly { 0%,100%{transform:translate(0,0);opacity:.15} 30%{opacity:.95} 50%{transform:translate(9px,-12px);opacity:.5} 70%{opacity:.9} }
 @keyframes wf-confetti { 0%{transform:translateY(-20px) rotate(0deg);opacity:1} 90%{opacity:1} 100%{transform:translateY(560px) rotate(660deg);opacity:0} }
-@keyframes wf-breathe { 0%,100%{transform:scale(1);opacity:.5} 50%{transform:scale(1.14);opacity:.9} }
 @keyframes wf-spin { to{transform:rotate(360deg)} }
 
 /* Kept from the current app: the shooting stars, and a slow drifting haze
@@ -31,3 +30,20 @@ body { margin: 0; background: #f2e0c8; font-family: 'Nunito', system-ui, sans-se
 /* Energy-forecast storm: a cozy drizzle falling the full height of the
    skyline (the per-house rain cloud keeps its own shorter wf-drop). */
 @keyframes wf-rain { from{transform:translateY(0)} to{transform:translateY(860px)} }
+
+/* Interactive controls are real <button>s; this reset lets their inline
+   sticker styles render exactly as the old clickable divs did. The focus ring
+   only appears for keyboard focus. */
+button { font: inherit; color: inherit; background: none; border: none; padding: 0; margin: 0; text-align: inherit; cursor: pointer; line-height: inherit; }
+button:disabled { cursor: default; }
+button:focus-visible, [role="button"]:focus-visible { outline: 3px solid rgba(201, 111, 78, .55); outline-offset: 2px; }
+
+/* Under ~800px the two side-by-side grids stack and the page gutters shrink —
+   the skyline itself stays desktop-shaped for now. */
+.kv-page { padding: 34px 30px 90px; }
+.kv-two-col { display: grid; grid-template-columns: 1.35fr 1fr; gap: 24px; align-items: start; }
+.kv-act-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-top: 18px; }
+@media (max-width: 800px) {
+  .kv-page { padding: 22px 14px 70px; }
+  .kv-two-col, .kv-act-grid { grid-template-columns: 1fr; }
+}

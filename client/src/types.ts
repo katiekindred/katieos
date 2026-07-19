@@ -2,7 +2,6 @@ export type Trend = 'rising' | 'steady' | 'fading';
 
 export interface Project {
   id: string;
-  workspace: 'personal' | 'home';
   name: string;
   blurb: string;
   status: string;
@@ -91,6 +90,8 @@ export interface WeeklyReview {
   rising: string[];
   fading: string[];
   wentDark: string[];
+  // Median week-to-date hours over the 4 prior weeks; 0 = no history.
+  typicalHoursWeekToDate: number;
 }
 
 export interface FeedEntry {
@@ -129,4 +130,6 @@ export type Weather = 'clear' | 'clouding' | 'storm';
 export interface EnergyForecast {
   weather: Weather;
   reasons: string[];
+  // Raw count of events in the next 7 days; null/absent when the calendar isn't readable.
+  calendarEventCountNext7d?: number | null;
 }

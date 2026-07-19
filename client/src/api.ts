@@ -7,7 +7,9 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `${res.status} ${res.statusText}`);
+    const err = new Error(body.error || `${res.status} ${res.statusText}`) as Error & { status: number };
+    err.status = res.status;
+    throw err;
   }
   return res.json();
 }
@@ -19,8 +21,8 @@ export const api = {
   updateProject: (id: string, fields: Partial<{ name: string; blurb: string; nextStep: string; status: string; threshold: string; houseColor: string | null }>) =>
     req<{ ok: true }>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(fields) }),
   removeProject: (id: string) => req<{ ok: true }>(`/projects/${id}`, { method: 'DELETE' }),
-  reorder: (order: string[], reason: string | null) =>
-    req<{ ok: true }>('/projects/reorder', { method: 'POST', body: JSON.stringify({ order, reason }) }),
+  reorder: (order: string[], reason: string | null, movedId: string | null) =>
+    req<{ ok: true }>('/projects/reorder', { method: 'POST', body: JSON.stringify({ order, reason, movedId }) }),
 
   calendar: () => req<{ events: CalendarEvent[] }>('/calendar').then(r => r.events),
 

@@ -1,6 +1,6 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { api } from '../api';
-import type { CalendarEvent, EnergyForecast, EnergyLevel, FeedEntry, FieldUpdate, Narrative, PickerField, Project, Summary, TaskLite, WeeklyReview } from '../types';
+import type { CalendarEvent, EnergyForecast, EnergyLevel, FeedEntry, FieldUpdate, Narrative, PickerField, Project, Summary, TaskLite, Weather, WeeklyReview } from '../types';
 import Confetti from './Confetti';
 import { HEX_RE, HOUSE_COLORS, colorsFor } from './houseColors';
 import NotionFieldDropdown from './NotionFieldDropdown';
@@ -26,6 +26,11 @@ const ENERGY_DOTS: { level: EnergyLevel; color: string }[] = [
   { level: 'Orange', color: '#e0906c' },
   { level: 'Red', color: '#b4453b' },
 ];
+
+// Weather chip colors: calm blue-gray for a storm, deliberately never red —
+// this is a forecast, not an alarm.
+const WEATHER_DOT: Record<Weather, string> = { clear: '#7ebe8c', clouding: '#d8b45a', storm: '#9caed4' };
+const WEATHER_WORD: Record<Weather, string> = { clear: 'clear skies', clouding: 'clouding over', storm: 'stormy' };
 
 // The forecast nudge is template-composed from the forecast's reasons:
 // evidence first, then one direct recommendation. Rotated deterministically by
@@ -58,13 +63,14 @@ function fmtClock(s: number): string {
   return String(m).padStart(2, '0') + ':' + String(ss).padStart(2, '0');
 }
 
-// "4h" → 4 hours, "45m" or bare "45" → minutes, "1h 30m" / "1.5h" also work.
+// "4h" → 4 hours, "45m" or bare "45" → minutes, "45s" → seconds, "1h 30m" /
+// "1.5h" also work.
 function parseDurationSec(raw: string): number {
   let total = 0;
-  for (const m of (raw || '').matchAll(/(\d+(?:\.\d+)?)\s*(h(?:ours?|rs?)?|m(?:in(?:ute)?s?)?)?/gi)) {
+  for (const m of (raw || '').matchAll(/(\d+(?:\.\d+)?)\s*(h(?:ours?|rs?)?|m(?:in(?:ute)?s?)?|s(?:ec(?:onds?)?)?)?/gi)) {
     const n = parseFloat(m[1]);
     const unit = (m[2] || 'm').toLowerCase();
-    total += unit.startsWith('h') ? n * 3600 : n * 60;
+    total += unit.startsWith('h') ? n * 3600 : unit.startsWith('s') ? n : n * 60;
   }
   return Math.round(total);
 }
@@ -171,6 +177,12 @@ function fieldUpdates(draft: Fields, orig: Fields, statusType: 'select' | 'statu
 
 interface ProjectDraft { name: string; blurb: string; threshold: string; nextStep: string; houseColor: string | null; colorHexInput: string }
 
+// Shared keyboard handler for role="button" elements (Enter/Space activate,
+// Space is prevented from scrolling the page).
+const keyActivate = (fn: () => void) => (e: React.KeyboardEvent) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); }
+};
+
 export default function Dashboard() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [calendar, setCalendar] = useState<CalendarEvent[]>([]);
@@ -184,11 +196,14 @@ export default function Dashboard() {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [reorderMsg, setReorderMsg] = useState<string | null>(null);
-  const [reorderOrder, setReorderOrder] = useState<string[] | null>(null);
+  const [reorderOrder, setReorderOrder] = useState<{ order: string[]; movedId: string } | null>(null);
   const [reorderReason, setReorderReason] = useState('');
   // 'saving' while a reorder is in flight to Notion, 'saved' once it lands,
   // 'error' if it fails. Drives the loading indicator in the toast.
   const [reorderStatus, setReorderStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  // The last reorder attempt, kept around so a failed save can be retried
+  // without re-dragging the card.
+  const lastReorderRef = useRef<{ order: string[]; reason: string | null; movedId: string | null } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ProjectDraft | null>(null);
 
@@ -223,6 +238,9 @@ export default function Dashboard() {
   const [energyNote, setEnergyNote] = useState('');
   const [energyThanks, setEnergyThanks] = useState(false);
   const [forecast, setForecast] = useState<EnergyForecast | null>(null);
+  // Whether the "why this weather?" reasons panel is open. Only ever
+  // clickable when the forecast actually has reasons to show.
+  const [weatherOpen, setWeatherOpen] = useState(false);
 
   // Open tasks per project, plus which project's task list is expanded and the
   // task a session should attach to (null = the project's next step; 'NEW' = a
@@ -243,6 +261,33 @@ export default function Dashboard() {
   const [manFields, setManFields] = useState<Fields>(BLANK_FIELDS);
   const [manOrig, setManOrig] = useState<Fields>(BLANK_FIELDS);
 
+  // Undo window for the two irreversible-feeling actions (complete a task,
+  // archive a building): the optimistic UI change happens immediately, but the
+  // Notion write waits 5s so the toast's Undo can cancel it. Only one pending
+  // action at a time — a second one commits the first straight away. Closing the
+  // tab inside the window abandons the pending write (acceptable: nothing in
+  // Notion has changed yet, and the next poll restores the UI).
+  const [undoToast, setUndoToast] = useState<string | null>(null);
+  const undoRef = useRef<{ commit: () => void; undo: () => void; timer: number } | null>(null);
+  function pushUndo(label: string, commit: () => void, undo: () => void) {
+    const prev = undoRef.current;
+    if (prev) { clearTimeout(prev.timer); undoRef.current = null; prev.commit(); }
+    const timer = window.setTimeout(() => { undoRef.current = null; setUndoToast(null); commit(); }, 5000);
+    undoRef.current = { commit, undo, timer };
+    setUndoToast(label);
+  }
+  function undoPending() {
+    const u = undoRef.current;
+    if (!u) return;
+    clearTimeout(u.timer);
+    undoRef.current = null; setUndoToast(null);
+    u.undo();
+  }
+  // Tasks/buildings mid-undo-window: kept out of the next poll's result so a
+  // background refresh doesn't resurrect or remove them before the window closes.
+  const pendingCompleteRef = useRef<Set<string>>(new Set());
+  const pendingArchiveRef = useRef<Set<string>>(new Set());
+
   const confettiTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   function celebrate() {
     setConfettiBurst(Date.now());
@@ -250,9 +295,16 @@ export default function Dashboard() {
     confettiTimer.current = setTimeout(() => setConfettiBurst(0), 4200);
   }
 
-  const tasksFor = (projectId: string | null) =>
-    tasks.filter(t => t.projectId === projectId)
-      .sort((a, b) => (b.priorityCalc ?? -Infinity) - (a.priorityCalc ?? -Infinity));
+  const tasksByProject = useMemo(() => {
+    const m = new Map<string | null, TaskLite[]>();
+    for (const t of tasks) {
+      const arr = m.get(t.projectId);
+      if (arr) arr.push(t); else m.set(t.projectId, [t]);
+    }
+    for (const arr of m.values()) arr.sort((a, b) => (b.priorityCalc ?? -Infinity) - (a.priorityCalc ?? -Infinity));
+    return m;
+  }, [tasks]);
+  const tasksFor = (projectId: string | null) => tasksByProject.get(projectId) ?? [];
 
   // Current field values of a task (for populating the editors), or blanks.
   const fieldsOfTask = (taskId: string | null): Fields => {
@@ -275,19 +327,26 @@ export default function Dashboard() {
 
   const heroRef = useRef<HTMLDivElement>(null);
   const priorityRef = useRef<HTMLDivElement>(null);
+  const scrollToPriority = useCallback(() => priorityRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), []);
+
+  // Skip applying a background projects refresh while a drag is in progress or a
+  // reorder is still saving — otherwise the poll reorders cards under the cursor
+  // or briefly reverts the optimistic order.
+  const reorderBusyRef = useRef(false);
+  useEffect(() => { reorderBusyRef.current = dragId !== null || reorderStatus === 'saving'; }, [dragId, reorderStatus]);
 
   const loadProjects = useCallback(async () => {
     try {
-      const list = await api.projects();
-      setProjects(list);
+      const list = (await api.projects()).filter(p => !pendingArchiveRef.current.has(p.id));
+      if (!reorderBusyRef.current) setProjects(list);
       setLoadError(null);
-      if (!manProject && list.length) setManProject(list[0].id);
+      if (list.length) setManProject(prev => prev ?? list[0].id);
     } catch (e: any) {
       setLoadError(e.message);
     } finally {
       setLoaded(true);
     }
-  }, [manProject]);
+  }, []);
 
   const loadCalendar = useCallback(async () => {
     try {
@@ -295,7 +354,7 @@ export default function Dashboard() {
       setCalendar(events);
       setCalendarState('ready');
     } catch (e: any) {
-      if (e.message?.includes('not configured')) setCalendarState('unconfigured');
+      if (e.status === 503) setCalendarState('unconfigured');
       else {
         setCalendarState('unauthorized');
         setCalendarAuthUrl('/api/auth/google');
@@ -312,7 +371,7 @@ export default function Dashboard() {
   }, []);
 
   const loadTasks = useCallback(async () => {
-    try { setTasks(await api.tasks()); } catch { /* non-fatal */ }
+    try { setTasks((await api.tasks()).filter(t => !pendingCompleteRef.current.has(t.id))); } catch { /* non-fatal */ }
   }, []);
 
   const loadReview = useCallback(async () => {
@@ -327,13 +386,15 @@ export default function Dashboard() {
     try { setSchema(await api.taskSchema()); } catch { /* non-fatal */ }
   }, []);
 
-  // A 503 means NOTION_ENERGY_PAGE isn't set — the strip stays hidden.
+  // A 503 means NOTION_ENERGY_PAGE isn't set — the strip stays hidden. Any
+  // other error is treated as transient (network hiccup) and leaves the
+  // current availability alone, rather than hiding the strip.
   const loadEnergy = useCallback(async () => {
     try {
       const entries = await api.energyLog(1);
       setEnergyAvailable(true);
       setLastCheckinAt(entries[0]?.createdAt ?? null);
-    } catch { setEnergyAvailable(false); }
+    } catch (e: any) { if (e.status === 503) setEnergyAvailable(false); }
   }, []);
 
   const loadForecast = useCallback(async () => {
@@ -360,7 +421,23 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [manProject, tasks]);
 
-  useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
+  useEffect(() => () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    // Don't abandon a pending undo just because the component's unmounting —
+    // commit it so the Notion write still happens.
+    if (undoRef.current) { clearTimeout(undoRef.current.timer); undoRef.current.commit(); }
+  }, []);
+
+  // Mirror a live/paused session into the tab title so a backgrounded tab still
+  // shows the clock.
+  useEffect(() => {
+    if (capMode === 'running' || capMode === 'paused') {
+      const name = capProject ? projects.find(p => p.id === capProject)?.name : null;
+      document.title = `${fmtClock(capSeconds)}${capMode === 'paused' ? ' ⏸' : ''}${name ? ` · ${name}` : ''} — Life OS`;
+    } else {
+      document.title = 'Life OS';
+    }
+  }, [capMode, capSeconds, capProject, projects]);
 
   // Resume a live session that survived a refresh or closed tab.
   useEffect(() => {
@@ -381,6 +458,7 @@ export default function Dashboard() {
   // ----- energy check-in -----
   async function onEnergyCheckin(level: EnergyLevel) {
     const note = energyNote;
+    const prevCheckinAt = lastCheckinAt;
     setEnergyNote('');
     setEnergyThanks(true);
     setLastCheckinAt(new Date().toISOString());
@@ -391,6 +469,7 @@ export default function Dashboard() {
       loadForecast();
     } catch (e: any) {
       setSaveError(`That check-in didn't reach Notion (${e.message}). It's not saved.`);
+      setLastCheckinAt(prevCheckinAt); setEnergyThanks(false);
     }
   }
   function onEnergySkip() {
@@ -437,14 +516,15 @@ export default function Dashboard() {
     const moved = reordered.find(p => p.id === id)!;
     const newRank = order.indexOf(id) + 1;
     setReorderMsg(`${moved.name} moved to #${newRank}.`);
-    setReorderOrder(order);
+    setReorderOrder({ order, movedId: id });
     setReorderReason('');
-    saveReorder(order, null);
+    saveReorder(order, null, id);
   }
   // Persist an order to Notion, flipping the loading indicator as it goes.
-  function saveReorder(order: string[], reason: string | null) {
+  function saveReorder(order: string[], reason: string | null, movedId: string | null) {
+    lastReorderRef.current = { order, reason, movedId };
     setReorderStatus('saving');
-    api.reorder(order, reason)
+    api.reorder(order, reason, movedId)
       .then(() => setReorderStatus('saved'))
       .catch(() => {
         setReorderStatus('error');
@@ -454,7 +534,7 @@ export default function Dashboard() {
   function submitReorderReason() {
     const reason = reorderReason.trim();
     if (!reason || !reorderOrder) return;
-    saveReorder(reorderOrder, reason);
+    saveReorder(reorderOrder.order, reason, reorderOrder.movedId);
     setReorderMsg(prev => (prev ? `${prev.replace(/\s*Saved with your reason\.?$/, '')} Saved with your reason.` : prev));
     setReorderOrder(null);
     setReorderReason('');
@@ -478,18 +558,28 @@ export default function Dashboard() {
     }
     loadProjects();
   }
-  async function removeProject(id: string) {
+  function removeProject(id: string) {
     const name = projects.find(p => p.id === id)?.name || 'this project';
-    if (!window.confirm(`Archive "${name}"? It moves to Status: Archive in Notion (nothing is deleted).`)) return;
     setEditingId(null);
     setProjects(ps => ps.filter(p => p.id !== id));
-    try { await api.removeProject(id); } catch (e: any) { setSaveError(`Couldn't archive in Notion: ${e.message}`); loadProjects(); }
+    pendingArchiveRef.current.add(id);
+    const commit = async () => {
+      try { await api.removeProject(id); } catch (e: any) { setSaveError(`Couldn't archive in Notion: ${e.message}`); }
+      pendingArchiveRef.current.delete(id);
+      loadProjects();
+    };
+    const undo = () => { pendingArchiveRef.current.delete(id); loadProjects(); };
+    pushUndo(`Archived "${name}" — it moves to Status: Archive in Notion, nothing is deleted.`, commit, undo);
   }
   async function addProject() {
     const priority = projects.length + 1;
-    const { id } = await api.createProject('New building', priority);
-    await loadProjects();
-    startEdit({ id, name: 'New building', blurb: '', threshold: '2 weeks', nextStep: '', houseColor: null } as Project);
+    try {
+      const { id } = await api.createProject('New building', priority);
+      await loadProjects();
+      startEdit({ id, name: 'New building', blurb: '', threshold: '2 weeks', nextStep: '', houseColor: null } as Project);
+    } catch (e: any) {
+      setSaveError(`Couldn't create a building in Notion: ${e.message}`);
+    }
   }
 
   // ----- timer -----
@@ -587,46 +677,76 @@ export default function Dashboard() {
     setFeed(f => [{ id: '', project: p?.name || '', note, when: 'Just now', dur: fmtDur(durSec), durationSec: durSec }, ...f]);
     setCapMode('idle'); setCapProject(null); setCapSeconds(0); setCapNote(''); setCapTaskId(null); setCapMarkDone(false);
     setCapFields(BLANK_FIELDS); setCapOrig(BLANK_FIELDS);
+    let res: { taskId: string } | null = null;
     try {
-      const res = await api.logActivity({ projectId: capProject, ...attachment(taskSel), note, durationSec: durSec, source: 'live' });
-      const updates = fieldUpdates(fDraft, fOrig, statusField?.type === 'select' ? 'select' : 'status');
-      if (res?.taskId && updates.length) await api.updateTaskFields(res.taskId, updates);
-      if (res?.taskId && markDone) await api.completeTask(res.taskId);
+      res = await api.logActivity({ projectId: capProject, ...attachment(taskSel), note, durationSec: durSec, source: 'live' });
       setSaveError(null);
       celebrate();
     } catch (e: any) {
-      setSaveError(`That session didn't reach Notion (${e.message}). It's not saved — log it again below.`);
+      setSaveError(`That session didn't reach Notion (${e.message}). It's not saved — I've tucked it into Manual Entry below.`);
+      // Park the lost session in Manual Entry so nothing has to be retyped.
+      chooseManProject(capProject);
+      setManDur(fmtDur(durSec));
+      setManNote(note === 'Worked a little.' ? '' : note);
+    }
+    if (res?.taskId) {
+      try {
+        const updates = fieldUpdates(fDraft, fOrig, statusField?.type === 'select' ? 'select' : 'status');
+        if (updates.length) await api.updateTaskFields(res.taskId, updates);
+        if (markDone) await api.completeTask(res.taskId);
+      } catch (e: any) {
+        setSaveError(`The session saved, but the task's field updates didn't reach Notion (${e.message}).`);
+      }
     }
     loadProjects(); loadFeed(); loadTasks(); loadReview(); loadSummary();
   }
   async function onAddManual() {
     if (!manProject) return;
     const p = projects.find(pr => pr.id === manProject);
+    const rawDur = manDur;
+    const manNoteRaw = manNote;
     const note = manNote || 'Logged after the fact.';
     const durSec = parseDurationSec(manDur);
     const taskSel = manTaskId;
     const fDraft = manFields, fOrig = manOrig;
     setFeed(f => [{ id: '', project: p?.name || '', note, when: 'Just now', dur: fmtDur(durSec), durationSec: durSec }, ...f]);
     setManDur(''); setManNote('');
+    let res: { taskId: string } | null = null;
     try {
-      const res = await api.logActivity({ projectId: manProject, ...attachment(taskSel), note, durationSec: durSec, source: 'manual' });
-      const updates = fieldUpdates(fDraft, fOrig, statusField?.type === 'select' ? 'select' : 'status');
-      if (res?.taskId && updates.length) await api.updateTaskFields(res.taskId, updates);
+      res = await api.logActivity({ projectId: manProject, ...attachment(taskSel), note, durationSec: durSec, source: 'manual' });
       setSaveError(null);
       celebrate();
     } catch (e: any) {
       setSaveError(`That entry didn't reach Notion (${e.message}). It's not saved — try again.`);
+      // Restore exactly what Katie had typed — nothing to retype after a failed save.
+      setManDur(rawDur); setManNote(manNoteRaw);
+    }
+    if (res?.taskId) {
+      try {
+        const updates = fieldUpdates(fDraft, fOrig, statusField?.type === 'select' ? 'select' : 'status');
+        if (updates.length) await api.updateTaskFields(res.taskId, updates);
+      } catch (e: any) {
+        setSaveError(`The session saved, but the task's field updates didn't reach Notion (${e.message}).`);
+      }
     }
     setManFields(BLANK_FIELDS); setManOrig(BLANK_FIELDS);
     loadProjects(); loadFeed(); loadTasks(); loadReview(); loadSummary();
   }
 
   // ----- tasks -----
-  async function completeTaskById(id: string) {
-    setTasks(ts => ts.filter(t => t.id !== id));
-    try { await api.completeTask(id); setSaveError(null); }
-    catch (e: any) { setSaveError(`Couldn't complete that task in Notion: ${e.message}`); loadTasks(); }
-    loadProjects(); loadFeed(); loadReview();
+  function completeTaskById(id: string) {
+    const t = tasks.find(x => x.id === id);
+    if (!t) return;
+    setTasks(ts => ts.filter(x => x.id !== id));
+    pendingCompleteRef.current.add(id);
+    const commit = async () => {
+      try { await api.completeTask(id); setSaveError(null); }
+      catch (e: any) { setSaveError(`Couldn't complete that task in Notion: ${e.message}`); loadTasks(); }
+      pendingCompleteRef.current.delete(id);
+      loadProjects(); loadFeed(); loadReview();
+    };
+    const undo = () => { pendingCompleteRef.current.delete(id); setTasks(ts => [...ts, t]); };
+    pushUndo(`Marked "${t.name}" done.`, commit, undo);
   }
   // Set a task's Notion Status to any option (the dropdown in the task list).
   // Optimistically reflect the new status name; loadTasks reconciles — a task
@@ -703,7 +823,13 @@ export default function Dashboard() {
   return (
     <div style={rootStyle}>
       {confettiBurst > 0 && <Confetti burstId={confettiBurst} />}
-      <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '34px 30px 90px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+      {undoToast && (
+        <div style={{ position: 'fixed', left: '50%', bottom: '26px', transform: 'translateX(-50%)', zIndex: 80, background: INK, color: '#fff', borderRadius: '16px', padding: '11px 16px', boxShadow: '0 10px 30px rgba(50,30,10,.35)', display: 'flex', alignItems: 'center', gap: '12px', fontSize: '12.5px', fontWeight: 700, animation: 'wf-in .3s ease both' }}>
+          <span>{undoToast}</span>
+          <button type="button" onClick={undoPending} style={{ color: '#f5d78e', fontWeight: 800, cursor: 'pointer', whiteSpace: 'nowrap' }}>Undo</button>
+        </div>
+      )}
+      <div className="kv-page" style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '24px' }}>
 
         <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: '20px', flexWrap: 'wrap' }}>
           <div>
@@ -718,8 +844,45 @@ export default function Dashboard() {
                 <span style={{ fontSize: '11.5px', color: INK_SOFT, fontWeight: 600 }}>{s.label}</span>
               </div>
             ))}
+            {forecast && (forecast.reasons.length > 0 ? (
+              <button
+                type="button"
+                onClick={() => setWeatherOpen(v => !v)}
+                aria-expanded={weatherOpen}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '8px', background: '#fffdf8', border: '2px solid #f0e2cf', borderRadius: '16px', padding: '8px 14px', boxShadow: '0 3px 0 #f0e2cf',
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: WEATHER_DOT[forecast.weather] }} />
+                <span style={{ fontSize: '12.5px', fontWeight: 800, color: INK }}>{WEATHER_WORD[forecast.weather]}</span>
+              </button>
+            ) : (
+              <div
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '8px', background: '#fffdf8', border: '2px solid #f0e2cf', borderRadius: '16px', padding: '8px 14px', boxShadow: '0 3px 0 #f0e2cf',
+                  cursor: 'default',
+                }}
+              >
+                <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: WEATHER_DOT[forecast.weather] }} />
+                <span style={{ fontSize: '12.5px', fontWeight: 800, color: INK }}>{WEATHER_WORD[forecast.weather]}</span>
+              </div>
+            ))}
           </div>
         </div>
+
+        {forecast && weatherOpen && forecast.reasons.length > 0 && (
+          <div style={{ background: '#fffdf8', border: '2px solid #f0e2cf', borderRadius: '18px', padding: '13px 16px', boxShadow: '0 3px 0 #f0e2cf', animation: 'wf-in .3s ease both' }}>
+            <div style={{ fontSize: '10.5px', letterSpacing: '.12em', textTransform: 'uppercase', color: '#a8927a', fontWeight: 800 }}>Why this weather?</div>
+            {forecast.reasons.map((r, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12.5px', fontWeight: 600, color: INK, padding: '3px 0' }}>
+                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: WEATHER_DOT[forecast.weather], flex: '0 0 auto' }} />
+                {r}
+              </div>
+            ))}
+            <div style={{ fontSize: '11px', color: '#a8927a', fontWeight: 600, marginTop: '6px' }}>Every warning names its evidence — this is everything the forecast noticed.</div>
+          </div>
+        )}
 
         {showEnergyStrip && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', background: '#fffdf8', border: '2px solid #f0e2cf', borderRadius: '18px', padding: '11px 16px', boxShadow: '0 3px 0 #f0e2cf', animation: 'wf-in .3s ease both' }}>
@@ -730,14 +893,14 @@ export default function Dashboard() {
                 <span style={{ fontSize: '12.5px', fontWeight: 800, color: INK, whiteSpace: 'nowrap' }}>Energy check</span>
                 <div style={{ display: 'flex', gap: '7px', flexWrap: 'wrap' }}>
                   {ENERGY_DOTS.map(d => (
-                    <div key={d.level} onClick={() => onEnergyCheckin(d.level)} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '7px', padding: '6px 12px', borderRadius: '12px', background: '#fff', border: '2px solid #ecdcc5' }}>
+                    <button type="button" key={d.level} onClick={() => onEnergyCheckin(d.level)} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '7px', padding: '6px 12px', borderRadius: '12px', background: '#fff', border: '2px solid #ecdcc5' }}>
                       <span style={{ width: '11px', height: '11px', borderRadius: '50%', background: d.color }} />
                       <span style={{ fontSize: '12px', fontWeight: 800, color: INK }}>{d.level}</span>
-                    </div>
+                    </button>
                   ))}
                 </div>
                 <input value={energyNote} onChange={e => setEnergyNote(e.target.value)} placeholder="Note, optional" style={{ ...input, flex: 1, minWidth: '150px', maxWidth: '280px', fontSize: '12px', padding: '7px 11px' }} />
-                <div onClick={onEnergySkip} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '5px 11px', border: '2px solid #f0e2cf', borderRadius: '10px', whiteSpace: 'nowrap' }}>Skip</div>
+                <button type="button" onClick={onEnergySkip} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '5px 11px', border: '2px solid #f0e2cf', borderRadius: '10px', whiteSpace: 'nowrap' }}>Skip</button>
               </>
             )}
           </div>
@@ -755,10 +918,10 @@ export default function Dashboard() {
               Loading your skyline from Notion…
             </div>
           )}
-          {loaded && projects.length > 0 && <Skyline projects={projects} truthOverride={narrative?.skyline ?? null} energyWeather={forecast?.weather ?? 'clear'} onRequestReorder={() => priorityRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })} />}
+          {loaded && projects.length > 0 && <Skyline projects={projects} truthOverride={narrative?.skyline ?? null} energyWeather={forecast?.weather ?? 'clear'} onRequestReorder={scrollToPriority} />}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1.35fr 1fr', gap: '24px', alignItems: 'start' }}>
+        <div className="kv-two-col">
 
           <div ref={priorityRef} style={stickerCard}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
@@ -776,6 +939,15 @@ export default function Dashboard() {
                   <span style={{ fontSize: '11px', fontWeight: 700, color: reorderStatus === 'error' ? '#b4453b' : '#a8927a', whiteSpace: 'nowrap' }}>
                     {reorderStatus === 'saving' ? 'Saving to Notion…' : reorderStatus === 'saved' ? '✓ Saved to Notion' : ''}
                   </span>
+                  {reorderStatus === 'error' && (
+                    <button
+                      type="button"
+                      onClick={() => lastReorderRef.current && saveReorder(lastReorderRef.current.order, lastReorderRef.current.reason, lastReorderRef.current.movedId)}
+                      style={{ fontSize: '11px', fontWeight: 800, color: ACCENT, cursor: 'pointer', border: '2px solid #e8d7bd', borderRadius: '10px', padding: '3px 9px', whiteSpace: 'nowrap' }}
+                    >
+                      Retry
+                    </button>
+                  )}
                 </div>
                 {reorderOrder && (
                   <div style={{ display: 'flex', gap: '7px' }}>
@@ -786,7 +958,7 @@ export default function Dashboard() {
                       placeholder="Add a reason (optional)…"
                       style={{ ...input, flex: 1, fontSize: '12px', padding: '7px 10px' }}
                     />
-                    <div onClick={submitReorderReason} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#a06a2e', background: '#fff', border: '2px solid #e8d7bd', borderRadius: '11px', padding: '7px 13px', whiteSpace: 'nowrap' }}>Add</div>
+                    <button type="button" onClick={submitReorderReason} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#a06a2e', background: '#fff', border: '2px solid #e8d7bd', borderRadius: '11px', padding: '7px 13px', whiteSpace: 'nowrap' }}>Add</button>
                   </div>
                 )}
               </div>
@@ -838,8 +1010,8 @@ export default function Dashboard() {
                           </div>
                           <div style={{ fontSize: '11px', color: INK_SOFT, fontWeight: 600 }}><b style={{ color: INK }}>{p.hours === 0 ? '0h' : `${p.hours}h`}</b> this week</div>
                         </div>
-                        <div onClick={() => setExpandedTasks(v => (v === p.id ? null : p.id))} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: expandedTasks === p.id ? ACCENT : '#a8927a', padding: '5px 10px', border: `2px solid ${expandedTasks === p.id ? '#e8d7bd' : '#f0e2cf'}`, borderRadius: '10px', flex: '0 0 auto', whiteSpace: 'nowrap' }}>{tasksFor(p.id).length} task{tasksFor(p.id).length === 1 ? '' : 's'}</div>
-                        <div onClick={() => startEdit(p)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '5px 10px', border: '2px solid #f0e2cf', borderRadius: '10px', flex: '0 0 auto' }}>Edit</div>
+                        <button type="button" onClick={() => setExpandedTasks(v => (v === p.id ? null : p.id))} aria-expanded={expandedTasks === p.id} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: expandedTasks === p.id ? ACCENT : '#a8927a', padding: '5px 10px', border: `2px solid ${expandedTasks === p.id ? '#e8d7bd' : '#f0e2cf'}`, borderRadius: '10px', flex: '0 0 auto', whiteSpace: 'nowrap' }}>{tasksFor(p.id).length} task{tasksFor(p.id).length === 1 ? '' : 's'}</button>
+                        <button type="button" onClick={() => startEdit(p)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '5px 10px', border: '2px solid #f0e2cf', borderRadius: '10px', flex: '0 0 auto' }}>Edit</button>
                         </div>
                         {expandedTasks === p.id && (
                           <div style={{ background: '#fbf6ec', border: '2px solid #f0e2cf', borderRadius: '14px', padding: '11px 13px' }}>
@@ -848,7 +1020,7 @@ export default function Dashboard() {
                               const statusOptId = statusField?.options.find(o => o.name === t.status)?.id ?? null;
                               return (
                               <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '9px', padding: '5px 0' }}>
-                                <span onClick={() => completeTaskById(t.id)} title="Mark done in Notion" style={{ width: '16px', height: '16px', borderRadius: '5px', border: '2px solid #dcc9ab', cursor: 'pointer', flex: '0 0 auto', background: '#fff' }} />
+                                <button type="button" onClick={() => completeTaskById(t.id)} title="Mark done in Notion" aria-label={`Mark "${t.name}" done`} style={{ display: 'inline-block', width: '16px', height: '16px', borderRadius: '5px', border: '2px solid #dcc9ab', cursor: 'pointer', flex: '0 0 auto', background: '#fff' }} />
                                 <span style={{ fontSize: '13px', color: INK, flex: 1, minWidth: 0, fontWeight: 600 }}>{t.name}</span>
                                 {t.isNextStep && <span style={{ fontSize: '9.5px', fontWeight: 800, letterSpacing: '.06em', color: ACCENT, background: ACCENT_SOFT, border: '2px solid #e8d7bd', borderRadius: '20px', padding: '2px 7px', flex: '0 0 auto' }}>NEXT</span>}
                                 {statusField && (
@@ -861,7 +1033,7 @@ export default function Dashboard() {
                             })}
                             <div style={{ display: 'flex', gap: '7px', marginTop: '8px' }}>
                               <input value={newTaskName} onChange={e => setNewTaskName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addTaskTo(p.id)} placeholder="Add a task…" style={{ ...input, fontSize: '12.5px', padding: '7px 10px' }} />
-                              <div onClick={() => addTaskTo(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#a06a2e', background: ACCENT_SOFT, border: '2px solid #e8d7bd', borderRadius: '11px', padding: '7px 13px', whiteSpace: 'nowrap' }}>Add</div>
+                              <button type="button" onClick={() => addTaskTo(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#a06a2e', background: ACCENT_SOFT, border: '2px solid #e8d7bd', borderRadius: '11px', padding: '7px 13px', whiteSpace: 'nowrap' }}>Add</button>
                             </div>
                           </div>
                         )}
@@ -882,8 +1054,8 @@ export default function Dashboard() {
                             {HOUSE_COLORS.map((c, ci) => {
                               const active = draft?.houseColor === String(ci);
                               return (
-                                <div key={ci} onClick={() => setDraft(d => d && ({ ...d, houseColor: String(ci), colorHexInput: '' }))} style={{
-                                  width: '28px', height: '28px', borderRadius: '9px', background: c.body, cursor: 'pointer',
+                                <button type="button" key={ci} onClick={() => setDraft(d => d && ({ ...d, houseColor: String(ci), colorHexInput: '' }))} aria-label={`House color ${ci + 1}`} style={{
+                                  display: 'inline-block', width: '28px', height: '28px', borderRadius: '9px', background: c.body, cursor: 'pointer',
                                   boxShadow: active ? 'inset 0 0 0 3px #4a3a2e' : 'inset 0 0 0 2px rgba(70,45,20,.12)',
                                 }} />
                               );
@@ -908,8 +1080,8 @@ export default function Dashboard() {
 
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginTop: '2px' }}>
                           <div style={{ display: 'flex', gap: '8px' }}>
-                            <div onClick={() => removeProject(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#b4453b', padding: '8px 14px', borderRadius: '12px', border: '2px solid #f0d3cf' }}>Archive</div>
-                            <div onClick={() => saveEdit(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#fff', background: ACCENT, padding: '8px 17px', borderRadius: '12px', boxShadow: `0 3px 0 ${ACCENT_DARK}` }}>Done</div>
+                            <button type="button" onClick={() => removeProject(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#b4453b', padding: '8px 14px', borderRadius: '12px', border: '2px solid #f0d3cf' }}>Archive</button>
+                            <button type="button" onClick={() => saveEdit(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, color: '#fff', background: ACCENT, padding: '8px 17px', borderRadius: '12px', boxShadow: `0 3px 0 ${ACCENT_DARK}` }}>Done</button>
                           </div>
                         </div>
                       </div>
@@ -920,14 +1092,22 @@ export default function Dashboard() {
               })}
               {dragId && dragOverIndex === projects.length && <div style={dropLineStyle} />}
 
-              <div onClick={addProject} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, color: ACCENT, border: '2px dashed #e8cdb8', borderRadius: '16px', padding: '12px', marginTop: '2px' }}>+ New building</div>
+              <button type="button" onClick={addProject} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, color: ACCENT, border: '2px dashed #e8cdb8', borderRadius: '16px', padding: '12px', marginTop: '2px' }}>+ New building</button>
             </div>
           </div>
 
           <div style={{ ...stickerCard, padding: '24px' }}>
             <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 800, fontSize: '21px', color: INK }}>On the horizon</div>
 
-            <div style={{ fontSize: '10.5px', letterSpacing: '.14em', textTransform: 'uppercase', color: '#a8927a', fontWeight: 800, marginTop: '18px' }}>Google Calendar</div>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '10px', marginTop: '18px' }}>
+              <div style={{ fontSize: '10.5px', letterSpacing: '.14em', textTransform: 'uppercase', color: '#a8927a', fontWeight: 800 }}>Google Calendar</div>
+              {calendarState === 'ready' && forecast?.calendarEventCountNext7d != null && (
+                // 10 mirrors HEAVY_CALENDAR_EVENTS in server derive.ts — the count the forecast treats as a heavy week.
+                <div style={{ fontSize: '10.5px', fontWeight: 700, whiteSpace: 'nowrap', color: forecast.calendarEventCountNext7d >= 10 ? '#a06a2e' : '#a8927a' }}>
+                  {forecast.calendarEventCountNext7d} event{forecast.calendarEventCountNext7d === 1 ? '' : 's'} next 7 days
+                </div>
+              )}
+            </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '9px', marginTop: '11px' }}>
               {calendarState === 'unconfigured' && <div style={{ fontSize: '12.5px', color: '#a8927a', fontWeight: 600 }}>Google Calendar isn't configured yet.</div>}
               {calendarState === 'unauthorized' && (
@@ -986,15 +1166,27 @@ export default function Dashboard() {
 
         {review && (
           <div style={stickerCard}>
-            <div onClick={() => setReviewOpen(o => !o)} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '14px', cursor: 'pointer' }}>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => setReviewOpen(o => !o)}
+              onKeyDown={keyActivate(() => setReviewOpen(o => !o))}
+              aria-expanded={reviewOpen}
+              style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '14px', cursor: 'pointer' }}
+            >
               <div>
                 <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 800, fontSize: '21px', color: INK }}>Your week in the neighborhood</div>
                 <div style={{ fontSize: '12.5px', color: INK_SOFT, marginTop: '4px', fontWeight: 600 }}>
                   <b style={{ color: INK }}>{review.totalHoursThisWeek}h</b> across {review.activeProjectsThisWeek} house{review.activeProjectsThisWeek === 1 ? '' : 's'} · {review.sessionsThisWeek} visit{review.sessionsThisWeek === 1 ? '' : 's'}
                   {review.totalHoursLastWeek > 0 && <span style={{ color: '#a8927a' }}> · {review.totalHoursThisWeek >= review.totalHoursLastWeek ? '▲' : '▼'} vs {review.totalHoursLastWeek}h last week</span>}
+                  {review.typicalHoursWeekToDate > 0 && <span style={{ color: '#a8927a' }}> · typically {review.typicalHoursWeekToDate}h by now</span>}
                 </div>
               </div>
-              <div style={{ fontSize: '11px', fontWeight: 800, color: ACCENT, whiteSpace: 'nowrap', padding: '5px 9px', border: '2px solid #e8d7bd', borderRadius: '10px' }}>{reviewOpen ? 'Hide' : 'Look back'}</div>
+              <button
+                type="button"
+                onClick={e => { e.stopPropagation(); setReviewOpen(o => !o); }}
+                style={{ fontSize: '11px', fontWeight: 800, color: ACCENT, whiteSpace: 'nowrap', padding: '5px 9px', border: '2px solid #e8d7bd', borderRadius: '10px' }}
+              >{reviewOpen ? 'Hide' : 'Look back'}</button>
             </div>
 
             {reviewOpen && (
@@ -1002,6 +1194,7 @@ export default function Dashboard() {
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
                   {[
                     { k: 'This week', v: `${review.totalHoursThisWeek}h` },
+                    ...(review.typicalHoursWeekToDate > 0 ? [{ k: 'Typical by now', v: `${review.typicalHoursWeekToDate}h` }] : []),
                     { k: 'Visits', v: String(review.sessionsThisWeek) },
                     { k: 'Streak', v: `${review.longestStreakDays} day${review.longestStreakDays === 1 ? '' : 's'}` },
                     ...(review.busiestDay ? [{ k: 'Busiest', v: `${review.busiestDay.label} · ${review.busiestDay.hours}h` }] : []),
@@ -1048,11 +1241,11 @@ export default function Dashboard() {
           {saveError && (
             <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', background: '#fdf1ef', border: '2px solid #f3d3cc', color: '#9a3b2a', borderRadius: '14px', padding: '10px 13px', fontSize: '12.5px', fontWeight: 600 }}>
               <span>{saveError}</span>
-              <span onClick={() => setSaveError(null)} style={{ cursor: 'pointer', fontWeight: 800, padding: '0 4px' }}>×</span>
+              <button type="button" onClick={() => setSaveError(null)} aria-label="Dismiss error" style={{ cursor: 'pointer', fontWeight: 800, padding: '0 4px' }}>×</button>
             </div>
           )}
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '22px', marginTop: '18px' }}>
+          <div className="kv-act-grid">
 
             <div style={{ border: '2px solid #ecdfc8', borderRadius: '20px', padding: '18px', background: '#fdf9f1' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -1079,7 +1272,7 @@ export default function Dashboard() {
               {capMode === 'picking' && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '7px', marginTop: '14px' }}>
                   {projects.map(p => (
-                    <div key={p.id} onClick={() => pick(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, padding: '8px 13px', borderRadius: '12px', background: '#fff', border: `2px solid ${colorsFor(p.houseColor, p.id).body}`, color: INK }}>{p.name}</div>
+                    <button type="button" key={p.id} onClick={() => pick(p.id)} style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 800, padding: '8px 13px', borderRadius: '12px', background: '#fff', border: `2px solid ${colorsFor(p.houseColor, p.id).body}`, color: INK }}>{p.name}</button>
                   ))}
                 </div>
               )}
@@ -1093,31 +1286,31 @@ export default function Dashboard() {
                       <div style={{ fontSize: '11px', color: INK_SOFT, marginBottom: '6px', fontWeight: 700 }}>Log against · <span style={{ color: '#a8927a' }}>defaults to the next step</span></div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                         {tasksFor(capProject).map(t => (
-                          <div key={t.id} onClick={() => chooseCapTask(t.id)} style={taskChip(capTaskId === t.id || (capTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</div>
+                          <button type="button" key={t.id} onClick={() => chooseCapTask(t.id)} style={taskChip(capTaskId === t.id || (capTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</button>
                         ))}
-                        <div onClick={() => chooseCapTask('NEW')} style={taskChip(capTaskId === 'NEW')}>+ New task</div>
+                        <button type="button" onClick={() => chooseCapTask('NEW')} style={taskChip(capTaskId === 'NEW')}>+ New task</button>
                       </div>
                       <TaskFieldEditors schema={schema} fields={capFields} onChange={setCapFields} />
                     </div>
                   )}
                   <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-                    <div onClick={onSaveSession} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '12.5px', fontWeight: 800, padding: '10px', borderRadius: '13px', background: ACCENT, color: '#fff', boxShadow: `0 3px 0 ${ACCENT_DARK}` }}>Save to Notion</div>
-                    <div onClick={onDiscard} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '12.5px', fontWeight: 800, padding: '10px 14px', borderRadius: '13px', background: 'transparent', border: '2px solid #ecdcc5', color: INK_SOFT }}>Never mind</div>
+                    <button type="button" onClick={onSaveSession} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '12.5px', fontWeight: 800, padding: '10px', borderRadius: '13px', background: ACCENT, color: '#fff', boxShadow: `0 3px 0 ${ACCENT_DARK}` }}>Save to Notion</button>
+                    <button type="button" onClick={onDiscard} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '12.5px', fontWeight: 800, padding: '10px 14px', borderRadius: '13px', background: 'transparent', border: '2px solid #ecdcc5', color: INK_SOFT }}>Never mind</button>
                   </div>
                 </div>
               )}
 
               {capMode === 'idle' && (
-                <div onClick={onStart} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px', borderRadius: '14px', background: ACCENT, color: '#fff', marginTop: '16px', boxShadow: `0 3px 0 ${ACCENT_DARK}` }}>Pop into a building &amp; start the clock</div>
+                <button type="button" onClick={onStart} style={{ display: 'block', width: '100%', cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px', borderRadius: '14px', background: ACCENT, color: '#fff', marginTop: '16px', boxShadow: `0 3px 0 ${ACCENT_DARK}` }}>Pop into a building &amp; start the clock</button>
               )}
               {(capMode === 'running' || capMode === 'paused') && (
                 <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
                   {capMode === 'running' ? (
-                    <div onClick={onPause} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px 16px', borderRadius: '14px', background: '#fff', border: '2px solid #ecdcc5', color: INK }}>Pause</div>
+                    <button type="button" onClick={onPause} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px 16px', borderRadius: '14px', background: '#fff', border: '2px solid #ecdcc5', color: INK }}>Pause</button>
                   ) : (
-                    <div onClick={onResume} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px 16px', borderRadius: '14px', background: '#fff', border: `2px solid ${ACCENT}`, color: ACCENT_DARK }}>Resume</div>
+                    <button type="button" onClick={onResume} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px 16px', borderRadius: '14px', background: '#fff', border: `2px solid ${ACCENT}`, color: ACCENT_DARK }}>Resume</button>
                   )}
-                  <div onClick={onStop} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px', borderRadius: '14px', background: INK, color: '#fff' }}>Stop &amp; tell the tale</div>
+                  <button type="button" onClick={onStop} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', fontSize: '13px', fontWeight: 800, padding: '12px', borderRadius: '14px', background: INK, color: '#fff' }}>Stop &amp; tell the tale</button>
                 </div>
               )}
             </div>
@@ -1131,11 +1324,11 @@ export default function Dashboard() {
                   const active = manProject === p.id;
                   const colors = colorsFor(p.houseColor, p.id);
                   return (
-                    <div key={p.id} onClick={() => chooseManProject(p.id)} style={{
+                    <button type="button" key={p.id} onClick={() => chooseManProject(p.id)} style={{
                       cursor: 'pointer', fontSize: '12px', fontWeight: 800, padding: '8px 12px', borderRadius: '12px',
                       background: active ? ACCENT : '#fff', color: active ? '#fff' : INK,
                       border: active ? `2px solid ${ACCENT}` : `2px solid ${colors.body}`, transition: 'all .15s',
-                    }}>{p.name}</div>
+                    }}>{p.name}</button>
                   );
                 })}
               </div>
@@ -1145,9 +1338,9 @@ export default function Dashboard() {
                   <div style={{ fontSize: '11px', color: INK_SOFT, marginBottom: '6px', fontWeight: 700 }}>Log against · <span style={{ color: '#a8927a' }}>defaults to the next step</span></div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                     {tasksFor(manProject).map(t => (
-                      <div key={t.id} onClick={() => chooseManTask(t.id)} style={taskChip(manTaskId === t.id || (manTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</div>
+                      <button type="button" key={t.id} onClick={() => chooseManTask(t.id)} style={taskChip(manTaskId === t.id || (manTaskId === null && t.isNextStep))}>{t.isNextStep ? '★ ' : ''}{t.name}</button>
                     ))}
-                    <div onClick={() => chooseManTask('NEW')} style={taskChip(manTaskId === 'NEW')}>+ New task</div>
+                    <button type="button" onClick={() => chooseManTask('NEW')} style={taskChip(manTaskId === 'NEW')}>+ New task</button>
                   </div>
                   <TaskFieldEditors schema={schema} fields={manFields} onChange={setManFields} />
                 </div>
@@ -1157,7 +1350,7 @@ export default function Dashboard() {
                 <input value={manDur} onChange={e => setManDur(e.target.value)} onKeyDown={e => e.key === 'Enter' && onAddManual()} placeholder="45m or 4h" style={{ ...input, width: '96px', borderRadius: '12px' }} />
                 <input value={manNote} onChange={e => setManNote(e.target.value)} onKeyDown={e => e.key === 'Enter' && onAddManual()} placeholder="What happened?" style={{ ...input, flex: 1, fontSize: '13px', borderRadius: '12px' }} />
               </div>
-              <div onClick={onAddManual} style={{ cursor: 'pointer', textAlign: 'center', fontSize: '12.5px', fontWeight: 800, padding: '10px', borderRadius: '13px', background: ACCENT_SOFT, color: '#a06a2e', border: '2px solid #e8d7bd', marginTop: '11px' }}>Tuck it into the diary</div>
+              <button type="button" onClick={onAddManual} style={{ display: 'block', width: '100%', cursor: 'pointer', textAlign: 'center', fontSize: '12.5px', fontWeight: 800, padding: '10px', borderRadius: '13px', background: ACCENT_SOFT, color: '#a06a2e', border: '2px solid #e8d7bd', marginTop: '11px' }}>Tuck it into the diary</button>
             </div>
           </div>
 
@@ -1179,8 +1372,8 @@ export default function Dashboard() {
                         <input value={feedDraft.note} onChange={e => setFeedDraft(d => ({ ...d, note: e.target.value }))} onKeyDown={e => e.key === 'Enter' && saveFeedEdit(f.id)} placeholder="What happened?" style={{ ...input, flex: 1, fontSize: '12.5px', padding: '7px 11px' }} autoFocus />
                         <input value={feedDraft.dur} onChange={e => setFeedDraft(d => ({ ...d, dur: e.target.value }))} onKeyDown={e => e.key === 'Enter' && saveFeedEdit(f.id)} placeholder="45m or 4h" style={{ ...input, width: '84px', fontSize: '12.5px', padding: '7px 11px' }} />
                       </div>
-                      <div onClick={() => saveFeedEdit(f.id)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#fff', background: ACCENT, padding: '6px 12px', borderRadius: '10px', flex: '0 0 auto' }}>Save</div>
-                      <div onClick={() => setEditingFeedId(null)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '6px 9px', border: '2px solid #f0e2cf', borderRadius: '10px', flex: '0 0 auto' }}>Cancel</div>
+                      <button type="button" onClick={() => saveFeedEdit(f.id)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#fff', background: ACCENT, padding: '6px 12px', borderRadius: '10px', flex: '0 0 auto' }}>Save</button>
+                      <button type="button" onClick={() => setEditingFeedId(null)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '6px 9px', border: '2px solid #f0e2cf', borderRadius: '10px', flex: '0 0 auto' }}>Cancel</button>
                     </>
                   ) : (
                     <>
@@ -1190,7 +1383,7 @@ export default function Dashboard() {
                       </div>
                       <div style={{ fontSize: '12px', fontWeight: 800, color: INK_SOFT, whiteSpace: 'nowrap' }}>{f.dur}</div>
                       {f.id && (
-                        <div onClick={() => startFeedEdit(f)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '5px 10px', border: '2px solid #f0e2cf', borderRadius: '10px', flex: '0 0 auto' }}>Edit</div>
+                        <button type="button" onClick={() => startFeedEdit(f)} style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 800, color: '#a8927a', padding: '5px 10px', border: '2px solid #f0e2cf', borderRadius: '10px', flex: '0 0 auto' }}>Edit</button>
                       )}
                     </>
                   )}

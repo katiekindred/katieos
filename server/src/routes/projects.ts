@@ -36,10 +36,21 @@ projectsRouter.delete('/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Body: { order: string[] (project ids, new rank order), reason?: string }
+// Body: { order: string[] (project ids, new rank order), reason?: string, movedId?: string }
 projectsRouter.post('/reorder', async (req, res) => {
   const order: string[] = req.body.order || [];
   const reason: string | null = req.body.reason || null;
-  await Promise.all(order.map((id, i) => writeReorderEvent(id, i + 1, reason)));
+  const movedId: string | null = req.body.movedId || null;
+  const { projects } = await fetchProjects();
+  const currentRank = new Map(projects.map(p => [p.id, p.priority]));
+  // Sequential, changed-ranks-only writes keep Notion's rate limit happy; the
+  // reason lands only on the project that was dragged.
+  for (const [i, id] of order.entries()) {
+    const newRank = i + 1;
+    const withReason = reason != null && id === movedId;
+    if (currentRank.get(id) !== newRank || withReason) {
+      await writeReorderEvent(id, newRank, withReason ? reason : null);
+    }
+  }
   res.json({ ok: true });
 });
